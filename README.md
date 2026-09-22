@@ -1,5 +1,9 @@
 # VoiceApp
 
+<p align="center">
+  <img src="docs/images/voiceapp-banner.png" alt="VoiceApp — push-to-talk dictation for Mac" width="900" />
+</p>
+
 **VoiceApp** is a free, open-source macOS menu-bar app for local speech-to-text. Press a hotkey, speak, and transcribed text is typed into the app in focus — no cloud required.
 
 VoiceApp is built and maintained by [DistinctZA](https://github.com/DistinctZA). It is inspired by and derived from [Handy](https://github.com/cjpais/Handy), created by [CJ Pais](https://github.com/cjpais). Thank you to CJ Pais and the Handy contributors for the open-source foundation that made VoiceApp possible.
@@ -13,6 +17,21 @@ VoiceApp is built and maintained by [DistinctZA](https://github.com/DistinctZA).
 | **Platform** | macOS (Apple Silicon) |
 | **Accent color** | `#bbff02` (lime green) |
 | **Menu bar icon** | Voice pulse rings (template icon) |
+
+---
+
+## See it in action
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/general-settings.png" alt="VoiceApp General settings with push-to-talk controls and model selection" /></td>
+    <td width="50%"><img src="docs/images/model-selection.png" alt="VoiceApp model manager showing Parakeet and Whisper models" /></td>
+  </tr>
+  <tr>
+    <td align="center"><strong>Configure your shortcut and active model</strong></td>
+    <td align="center"><strong>Choose local Parakeet or Whisper models</strong></td>
+  </tr>
+</table>
 
 ---
 
