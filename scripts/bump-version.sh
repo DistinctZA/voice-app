@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bump VoiceApp version across package.json, tauri.conf.json, and Cargo.toml.
+# Bump every tracked VoiceApp version source together.
 #
 # Usage:
 #   ./scripts/bump-version.sh 1.0.2
@@ -26,6 +26,8 @@ fi
 PACKAGE_JSON="${REPO_ROOT}/package.json"
 TAURI_CONF="${REPO_ROOT}/src-tauri/tauri.conf.json"
 CARGO_TOML="${REPO_ROOT}/src-tauri/Cargo.toml"
+CARGO_LOCK="${REPO_ROOT}/src-tauri/Cargo.lock"
+README="${REPO_ROOT}/README.md"
 
 OLD_VERSION="$(node -p "require('${PACKAGE_JSON}').version")"
 
@@ -38,15 +40,35 @@ node <<EOF
 const fs = require('fs');
 const pkgPath = '${PACKAGE_JSON}';
 const tauriPath = '${TAURI_CONF}';
+const cargoPath = '${CARGO_TOML}';
+const lockPath = '${CARGO_LOCK}';
+const readmePath = '${README}';
 const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
 pkg.version = '${NEW_VERSION}';
 fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
 const tauri = JSON.parse(fs.readFileSync(tauriPath, 'utf8'));
 tauri.version = '${NEW_VERSION}';
 fs.writeFileSync(tauriPath, JSON.stringify(tauri, null, 2) + '\n');
+
+const cargo = fs.readFileSync(cargoPath, 'utf8').replace(
+  /(^\[package\][\s\S]*?^version = ")[^"]+("$)/m,
+  (_, prefix, suffix) => prefix + '${NEW_VERSION}' + suffix,
+);
+fs.writeFileSync(cargoPath, cargo);
+
+const lock = fs.readFileSync(lockPath, 'utf8').replace(
+  /(\[\[package\]\]\nname = "voiceapp"\nversion = ")[^"]+("\n)/,
+  (_, prefix, suffix) => prefix + '${NEW_VERSION}' + suffix,
+);
+fs.writeFileSync(lockPath, lock);
+
+const readme = fs.readFileSync(readmePath, 'utf8')
+  .replace('| **Version** | ${OLD_VERSION} |', '| **Version** | ${NEW_VERSION} |')
+  .replace('VoiceApp v${OLD_VERSION} (Dev)', 'VoiceApp v${NEW_VERSION} (Dev)');
+fs.writeFileSync(readmePath, readme);
 EOF
 
-sed -i '' "s/^version = \".*\"/version = \"${NEW_VERSION}\"/" "$CARGO_TOML"
+"${REPO_ROOT}/scripts/check-version.sh"
 
 echo "Bumped VoiceApp ${OLD_VERSION} → ${NEW_VERSION}"
 echo ""
@@ -54,9 +76,11 @@ echo "Updated:"
 echo "  - package.json"
 echo "  - src-tauri/tauri.conf.json"
 echo "  - src-tauri/Cargo.toml"
+echo "  - src-tauri/Cargo.lock"
+echo "  - README.md"
 echo ""
 echo "Next steps:"
-echo "  git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml"
+echo "  git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock README.md"
 echo "  git commit -m \"Release VoiceApp ${NEW_VERSION}\""
 echo "  git push"
 echo "  ./scripts/install.sh    # on each Mac"

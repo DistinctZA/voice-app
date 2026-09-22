@@ -16,6 +16,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Verify tracked versions match
+        run: ./scripts/check-version.sh
       - name: Tag and release new versions
         env:
           GH_TOKEN: ${{ github.token }}
