@@ -1,0 +1,108 @@
+.recording-overlay {
+  height: 36px;
+  width: 172px;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  padding: 6px;
+  background: #000000cc;
+  border-radius: 18px;
+  opacity: 0;
+  transition: opacity 300ms ease-out;
+  box-sizing: border-box;
+}
+
+.overlay-left {
+  display: flex;
+  align-items: center;
+}
+
+.overlay-middle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.overlay-right {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.voice-trace {
+  /* Inset from the state icon and cancel button so the trace floats
+     centered between them instead of touching either side */
+  width: calc(100% - 24px);
+  margin: 0 12px;
+  height: 24px;
+  display: block;
+}
+
+.recording-overlay.fade-in {
+  opacity: 1;
+}
+
+/* The microphone is still opening — the overlay is visible so the hotkey
+   feels responsive, but dimmed and pulsing so it doesn't read as "talk now"
+   before anything is being captured. */
+/* Scoped to .fade-in so the animation can never override the hidden state's
+   opacity: 0 (e.g. cancelling while the microphone is still opening). */
+.recording-overlay.fade-in.warming {
+  animation: overlay-warming 900ms infinite ease-in-out;
+}
+
+.recording-overlay.warming .voice-trace {
+  opacity: 0.35;
+}
+
+@keyframes overlay-warming {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+
+.transcribing-text {
+  color: white;
+  font-size: 12px;
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  animation: transcribing-pulse 1.5s infinite ease-in-out;
+}
+
+@keyframes transcribing-pulse {
+  0%,
+  100% {
+    opacity: 0.6;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.cancel-button {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition:
+    background-color 150ms ease-out,
+    transform 100ms ease-out;
+  flex-shrink: 0;
+}
+
+.cancel-button:hover {
+  background: #bbff0233;
+  transform: scale(1.05);
+}
+
+.cancel-button:active {
+  transform: scale(0.95);
+}

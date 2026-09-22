@@ -1,0 +1,31 @@
+name: Tag release versions
+
+# Whenever a push to main carries a new version in package.json,
+# create the matching git tag and a GitHub Release for it.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Tag and release new versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V=$(jq -r .version package.json)
+          if git rev-parse "v$V" >/dev/null 2>&1; then
+            echo "v$V already tagged"
+            exit 0
+          fi
+          git tag "v$V"
+          git push origin "v$V"
+          gh release create "v$V" --title "VoiceApp $V" \
+            --notes "$(git log -1 --pretty=%s)"

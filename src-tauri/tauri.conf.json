@@ -1,0 +1,81 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "VoiceApp",
+  "version": "1.4.0",
+  "identifier": "com.distinctza.voiceapp",
+  "build": {
+    "beforeDevCommand": "bun run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "bun run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": {
+          "allow": [
+            "**"
+          ],
+          "requireLiteralLeadingDot": false
+        }
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": true,
+    "targets": "all",
+    "resources": [
+      "resources/**/*"
+    ],
+    "license": "MIT",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "files": {},
+      "hardenedRuntime": true,
+      "minimumSystemVersion": "10.15",
+      "signingIdentity": "-",
+      "entitlements": "Entitlements.plist"
+    },
+    "linux": {
+      "deb": {
+        "depends": [
+          "libgtk-layer-shell0"
+        ]
+      },
+      "rpm": {
+        "compression": {
+          "type": "none"
+        }
+      },
+      "appimage": {
+        "bundleMediaFramework": true,
+        "files": {}
+      }
+    },
+    "windows": {
+      "signCommand": "trusted-signing-cli -e https://eus.codesigning.azure.net/ -a CJ-Signing -c cjpais-dev -d VoiceApp %1",
+      "nsis": {
+        "template": "nsis/installer.nsi"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEMxOTM3M0Q0MDEyNERCQjgKUldTNDJ5UUIxSE9Ud1E2OWcrVDE2UVQ3c2FlenZJVXUrc2gzSzNNNlRQZ1Fja2hNa1VRZkpkc08K",
+      "endpoints": [
+        "https://github.com/DistinctZA/voiceapp-releases/releases/latest/download/latest.json"
+      ]
+    }
+  }
+}
