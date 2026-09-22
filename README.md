@@ -90,7 +90,7 @@ The easiest route is through the **[VoiceApp website](https://voice-app.xyz/)**:
 
 1. Click **Download for Free** on the website, or download the latest `.dmg` directly from [GitHub Releases](https://github.com/DistinctZA/voiceapp-releases/releases/latest).
 2. Open the DMG and drag **VoiceApp** into **Applications**.
-3. Right-click VoiceApp and choose **Open** the first time if macOS blocks the unsigned app.
+3. Open VoiceApp from **Applications**. Published downloads are signed and notarized by Apple.
 4. Grant **Microphone** and **Accessibility** access during onboarding.
 
 Released builds update themselves from the public [`voiceapp-releases`](https://github.com/DistinctZA/voiceapp-releases) repository.

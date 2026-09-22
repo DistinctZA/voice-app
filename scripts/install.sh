@@ -552,7 +552,7 @@ FEED
 - 🎛 Push-to-talk on any key, live voice pulse, custom vocabulary, dictation history, signed auto-updates
 
 ### Install
-Download VoiceApp_${version}_aarch64.dmg below, drag to Applications, right-click → Open the first time. The app updates itself from then on.
+Download VoiceApp_${version}_aarch64.dmg below, drag it to Applications, and open it normally. Published builds are signed and notarized by Apple. The app updates itself from then on.
 
 🌐 **[voice-app.xyz](https://voice-app.xyz/)** · ☕ **[Support development](https://ko-fi.com/voiceapp)** · Requires macOS on Apple Silicon
 NOTES
