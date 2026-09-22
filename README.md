@@ -4,6 +4,14 @@
   <img src="docs/images/voiceapp-banner.png" alt="VoiceApp — push-to-talk dictation for Mac" width="900" />
 </p>
 
+<p align="center">
+  <a href="https://voice-app.xyz/"><strong>Website</strong></a>
+  ·
+  <a href="https://github.com/DistinctZA/voiceapp-releases/releases/latest"><strong>Download for macOS</strong></a>
+  ·
+  <a href="https://github.com/DistinctZA/voiceapp-releases/releases"><strong>All releases</strong></a>
+</p>
+
 **VoiceApp** is a free, open-source macOS menu-bar app for local speech-to-text. Press a hotkey, speak, and transcribed text is typed into the app in focus — no cloud required.
 
 VoiceApp is built and maintained by [DistinctZA](https://github.com/DistinctZA). It is inspired by and derived from [Handy](https://github.com/cjpais/Handy), created by [CJ Pais](https://github.com/cjpais). Thank you to CJ Pais and the Handy contributors for the open-source foundation that made VoiceApp possible.
@@ -76,7 +84,20 @@ Custom Whisper `.bin` files dropped into the models folder are still discovered 
 
 ---
 
-## Prerequisites
+## Install the app
+
+The easiest route is through the **[VoiceApp website](https://voice-app.xyz/)**:
+
+1. Click **Download for Free** on the website, or download the latest `.dmg` directly from [GitHub Releases](https://github.com/DistinctZA/voiceapp-releases/releases/latest).
+2. Open the DMG and drag **VoiceApp** into **Applications**.
+3. Right-click VoiceApp and choose **Open** the first time if macOS blocks the unsigned app.
+4. Grant **Microphone** and **Accessibility** access during onboarding.
+
+Released builds update themselves from the public [`voiceapp-releases`](https://github.com/DistinctZA/voiceapp-releases) repository.
+
+---
+
+## Build prerequisites
 
 - **macOS** on Apple Silicon
 - [Xcode Command Line Tools](https://developer.apple.com/xcode/)
@@ -112,9 +133,9 @@ Microphone access is requested separately during onboarding.
 
 ---
 
-## Install on macOS (recommended)
+## Install from source
 
-Use the install script to pull the latest code from GitHub, build a release `.app`, and copy it to **Applications**. Each run checks for repository updates before building.
+Use the install script to pull the latest code from GitHub, build a release `.app`, and copy it to **Applications**. Each run checks for repository updates before building. The prerequisites above are only needed for this source-build method.
 
 ### First-time setup
 
@@ -167,22 +188,28 @@ Run from Terminal as `./scripts/install.sh`, or double-click **`Install VoiceApp
 
 Packaged builds check the [public release feed](https://github.com/DistinctZA/voiceapp-releases/releases) for updates. Source installations update through **git + reinstall**:
 
-### For you (developer releasing 1.0.2, 1.1.0, etc.)
+### Maintainer release flow
 
 1. Make your code changes on `main`
 2. Bump the version everywhere:
    ```bash
-   ./scripts/bump-version.sh 1.0.2
+   ./scripts/bump-version.sh 1.4.1
    ```
    This updates `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml`.
 3. Commit and push:
    ```bash
    git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml
-   git commit -m "Release VoiceApp 1.0.2"
+   git commit -m "Release VoiceApp 1.4.1"
    git push
    ```
+4. On the configured release Mac, build, sign, install, and publish:
+   ```bash
+   ./scripts/install.sh --force
+   ```
 
-### On each Mac (installing 1.0.2)
+The source-repository workflow creates the version tag. The release script uploads the customer-facing DMG, signed updater archive, and `latest.json` feed to [`DistinctZA/voiceapp-releases`](https://github.com/DistinctZA/voiceapp-releases/releases).
+
+### Updating a source installation
 
 ```bash
 cd voice-app
@@ -195,7 +222,7 @@ Your models and settings in `~/Library/Application Support/com.distinctza.voicea
 
 ### Version numbering
 
-Use semantic versions: `MAJOR.MINOR.PATCH` (e.g. `1.0.0` → `1.0.2` → `1.1.0`). The menu bar shows the version from the built app (e.g. **VoiceApp v1.0.2**).
+Use semantic versions: `MAJOR.MINOR.PATCH` (e.g. `1.4.0` → `1.4.1` → `1.5.0`). The menu bar shows the version from the built app (e.g. **VoiceApp v1.4.1**).
 
 ---
 
