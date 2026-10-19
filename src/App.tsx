@@ -7,7 +7,12 @@ import {
   checkAccessibilityPermission,
   checkMicrophonePermission,
 } from "tauri-plugin-macos-permissions-api";
-import { ModelStateEvent, RecordingErrorEvent } from "./lib/types/events";
+import {
+  ModelStateEvent,
+  RecordingErrorEvent,
+  TranscriptionErrorEvent,
+} from "./lib/types/events";
+import { showTranscriptionError } from "./lib/transcriptionErrors";
 import "./App.css";
 import AccessibilityPermissions from "./components/AccessibilityPermissions";
 import Footer from "./components/footer";
@@ -135,6 +140,19 @@ function App() {
       unlisten.then((fn) => fn());
     };
   }, [t]);
+
+  // Offer a retry using the recording saved by the failed transcription.
+  useEffect(() => {
+    const unlisten = listen<TranscriptionErrorEvent>(
+      "transcription-error",
+      (event) => {
+        showTranscriptionError(event.payload);
+      },
+    );
+    return () => {
+      void unlisten.then((fn) => fn());
+    };
+  }, []);
 
   // Listen for paste failures and show a toast.
   // The technical error detail is logged to voiceapp.log on the Rust side

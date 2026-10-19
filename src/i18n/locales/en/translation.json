@@ -629,6 +629,11 @@
   },
   "errors": {
     "loadDirectory": "Error loading directory: {{error}}",
+    "settingUpdateFailed": "Could not update setting",
+    "transcriptionFailedTitle": "Transcription failed",
+    "retryTranscription": "Retry recording",
+    "transcriptionRetrying": "Retrying transcription…",
+    "transcriptionRetried": "Transcription saved in History",
     "micPermissionDeniedTitle": "Microphone Access Denied",
     "micPermissionDenied": {
       "generic": "Microphone access was denied by the operating system. Please grant microphone permission in your system settings.",

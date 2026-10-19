@@ -1,3 +1,4 @@
+use super::recording_mute::RecordingMute;
 use crate::audio_toolkit::{list_input_devices, vad::SmoothedVad, AudioRecorder, SileroVad};
 use crate::helpers::clamshell;
 use crate::settings::{get_settings, AppSettings};
@@ -157,7 +158,7 @@ pub struct AudioRecordingManager {
     recorder: Arc<Mutex<Option<AudioRecorder>>>,
     is_open: Arc<Mutex<bool>>,
     is_recording: Arc<Mutex<bool>>,
-    did_mute: Arc<Mutex<bool>>,
+    recording_mute: Arc<Mutex<RecordingMute>>,
     close_generation: Arc<AtomicU64>,
     /// Last successful name→device lookup. Enumerating input devices is a
     /// CoreAudio round trip (~40ms) on the hotkey path, and the answer only
@@ -185,7 +186,7 @@ impl AudioRecordingManager {
             recorder: Arc::new(Mutex::new(None)),
             is_open: Arc::new(Mutex::new(false)),
             is_recording: Arc::new(Mutex::new(false)),
-            did_mute: Arc::new(Mutex::new(false)),
+            recording_mute: Arc::new(Mutex::new(RecordingMute::default())),
             close_generation: Arc::new(AtomicU64::new(0)),
             device_cache: Arc::new(Mutex::new(None)),
         };
@@ -279,26 +280,19 @@ impl AudioRecordingManager {
 
     /* ---------- microphone life-cycle -------------------------------------- */
 
-    /// Applies mute if mute_while_recording is enabled and stream is open
-    pub fn apply_mute(&self) {
-        let settings = get_settings(&self.app_handle);
-        let mut did_mute_guard = self.did_mute.lock().unwrap();
-
-        if settings.mute_while_recording && *self.is_open.lock().unwrap() {
-            set_mute(true);
-            *did_mute_guard = true;
-            debug!("Mute applied");
-        }
+    /// Only the active recording's start-sound callback may apply mute.
+    pub fn apply_mute(&self, recording: u64) {
+        let enabled = get_settings(&self.app_handle).mute_while_recording;
+        self.recording_mute
+            .lock()
+            .unwrap()
+            .apply(recording, enabled, set_mute);
     }
 
-    /// Removes mute if it was applied
+    /// Invalidate delayed callbacks and restore audio immediately, even when
+    /// the microphone stays open for always-on mode or lazy closing.
     pub fn remove_mute(&self) {
-        let mut did_mute_guard = self.did_mute.lock().unwrap();
-        if *did_mute_guard {
-            set_mute(false);
-            *did_mute_guard = false;
-            debug!("Mute removed");
-        }
+        self.recording_mute.lock().unwrap().finish(set_mute);
     }
 
     pub fn preload_vad(&self) -> Result<(), anyhow::Error> {
@@ -328,10 +322,6 @@ impl AudioRecordingManager {
         }
 
         let start_time = Instant::now();
-
-        // Don't mute immediately - caller will handle muting after audio feedback
-        let mut did_mute_guard = self.did_mute.lock().unwrap();
-        *did_mute_guard = false;
 
         // Get the selected device from settings, considering clamshell mode
         let settings = get_settings(&self.app_handle);
@@ -377,11 +367,7 @@ impl AudioRecordingManager {
             return;
         }
 
-        let mut did_mute_guard = self.did_mute.lock().unwrap();
-        if *did_mute_guard {
-            set_mute(false);
-        }
-        *did_mute_guard = false;
+        self.remove_mute();
 
         if let Some(rec) = self.recorder.lock().unwrap().as_mut() {
             // If still recording, stop first.
@@ -421,7 +407,7 @@ impl AudioRecordingManager {
 
     /* ---------- recording --------------------------------------------------- */
 
-    pub fn try_start_recording(&self, binding_id: &str) -> Result<(), String> {
+    pub fn try_start_recording(&self, binding_id: &str) -> Result<u64, String> {
         let mut state = self.state.lock().unwrap();
 
         if let RecordingState::Idle = *state {
@@ -442,8 +428,9 @@ impl AudioRecordingManager {
                     *state = RecordingState::Recording {
                         binding_id: binding_id.to_string(),
                     };
+                    let recording = self.recording_mute.lock().unwrap().begin();
                     debug!("Recording started for binding {binding_id}");
-                    return Ok(());
+                    return Ok(recording);
                 }
             }
             Err("Recorder not available".to_string())
@@ -472,6 +459,7 @@ impl AudioRecordingManager {
                 binding_id: ref active,
             } if active == binding_id => {
                 *state = RecordingState::Idle;
+                self.remove_mute();
                 drop(state);
 
                 // Optionally keep recording for a bit longer to capture trailing audio
@@ -535,6 +523,7 @@ impl AudioRecordingManager {
 
         if let RecordingState::Recording { .. } = *state {
             *state = RecordingState::Idle;
+            self.remove_mute();
             drop(state);
 
             if let Some(rec) = self.recorder.lock().unwrap().as_ref() {

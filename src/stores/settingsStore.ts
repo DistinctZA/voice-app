@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
 import { listen } from "@tauri-apps/api/event";
+import { toast } from "sonner";
+import i18n from "@/i18n";
 import type {
   AppSettings as Settings,
   AudioDevice,
@@ -142,6 +144,9 @@ const settingUpdaters: {
     commands.changeExtraRecordingBufferSetting(value as number),
 };
 
+let nextSettingUpdate = 0;
+const pendingSettingUpdates = new Map<keyof Settings, number>();
+
 export const useSettingsStore = create<SettingsStore>()(
   subscribeWithSelector((set, get) => ({
     settings: null,
@@ -275,6 +280,8 @@ export const useSettingsStore = create<SettingsStore>()(
       const { settings, setUpdating } = get();
       const updateKey = String(key);
       const originalValue = settings?.[key];
+      const updateId = ++nextSettingUpdate;
+      pendingSettingUpdates.set(key, updateId);
 
       setUpdating(updateKey, true);
 
@@ -285,17 +292,38 @@ export const useSettingsStore = create<SettingsStore>()(
 
         const updater = settingUpdaters[key];
         if (updater) {
-          await updater(value);
+          const result = await updater(value);
+          // Specta commands resolve backend failures as Result objects;
+          // they do not necessarily reject the promise.
+          if (
+            result !== null &&
+            typeof result === "object" &&
+            "status" in result &&
+            result.status === "error" &&
+            "error" in result
+          ) {
+            throw new Error(String(result.error));
+          }
         } else if (key !== "bindings" && key !== "selected_model") {
           console.warn(`No handler for setting: ${String(key)}`);
         }
       } catch (error) {
         console.error(`Failed to update setting ${String(key)}:`, error);
-        if (settings) {
-          set({ settings: { ...settings, [key]: originalValue } });
+        if (pendingSettingUpdates.get(key) === updateId) {
+          set((state) => ({
+            settings: state.settings
+              ? { ...state.settings, [key]: originalValue }
+              : null,
+          }));
+          toast.error(i18n.t("errors.settingUpdateFailed"), {
+            description: error instanceof Error ? error.message : String(error),
+          });
         }
       } finally {
-        setUpdating(updateKey, false);
+        if (pendingSettingUpdates.get(key) === updateId) {
+          pendingSettingUpdates.delete(key);
+          setUpdating(updateKey, false);
+        }
       }
     },
 

@@ -25,6 +25,12 @@ struct RecordingErrorEvent {
     detail: Option<String>,
 }
 
+#[derive(Clone, serde::Serialize)]
+struct TranscriptionErrorEvent {
+    detail: String,
+    history_entry_id: Option<i64>,
+}
+
 /// Drop guard that notifies the [`TranscriptionCoordinator`] when the
 /// transcription pipeline finishes — whether it completes normally or panics.
 struct FinishGuard(AppHandle);
@@ -140,56 +146,20 @@ impl ShortcutAction for TranscribeAction {
         // running — see show_starting_overlay.
         show_starting_overlay(app);
 
-        // Get the microphone mode to determine audio feedback timing
-        let settings = get_settings(app);
-        let is_always_on = settings.always_on_microphone;
-        debug!("Microphone mode - always_on: {}", is_always_on);
-
         let mut recording_error: Option<String> = None;
-        if is_always_on {
-            // Always-on mode: Play audio feedback immediately, then apply mute after sound finishes
-            debug!("Always-on mode: Playing audio feedback immediately");
-            let rm_clone = Arc::clone(&rm);
-            let app_clone = app.clone();
-            // The blocking helper exits immediately if audio feedback is disabled,
-            // so we can always reuse this thread to ensure mute happens right after playback.
-            std::thread::spawn(move || {
-                play_feedback_sound_blocking(&app_clone, SoundType::Start);
-                rm_clone.apply_mute();
-            });
-
-            if let Err(e) = rm.try_start_recording(&binding_id) {
-                debug!("Recording failed: {}", e);
-                recording_error = Some(e);
-            } else {
+        match rm.try_start_recording(&binding_id) {
+            Ok(recording) => {
                 mark_overlay_recording(app);
+                let app_clone = app.clone();
+                let rm_clone = Arc::clone(&rm);
+                std::thread::spawn(move || {
+                    play_feedback_sound_blocking(&app_clone, SoundType::Start);
+                    rm_clone.apply_mute(recording);
+                });
             }
-        } else {
-            // On-demand mode: Start recording first, then play audio feedback, then apply mute
-            // This allows the microphone to be activated before playing the sound
-            debug!("On-demand mode: Starting recording first, then audio feedback");
-            let recording_start_time = Instant::now();
-            match rm.try_start_recording(&binding_id) {
-                Ok(()) => {
-                    debug!("Recording started in {:?}", recording_start_time.elapsed());
-                    // The stream is playing by the time try_start_recording
-                    // returns, so the "you can talk now" cue goes out straight
-                    // away — it used to wait on a 100ms sleep on top of an
-                    // already slow open.
-                    mark_overlay_recording(app);
-                    let app_clone = app.clone();
-                    let rm_clone = Arc::clone(&rm);
-                    std::thread::spawn(move || {
-                        // Helper handles disabled audio feedback by returning early, so we reuse it
-                        // to keep mute sequencing consistent in every mode.
-                        play_feedback_sound_blocking(&app_clone, SoundType::Start);
-                        rm_clone.apply_mute();
-                    });
-                }
-                Err(e) => {
-                    debug!("Failed to start recording: {}", e);
-                    recording_error = Some(e);
-                }
+            Err(e) => {
+                debug!("Failed to start recording: {}", e);
+                recording_error = Some(e);
             }
         }
 
@@ -364,15 +334,26 @@ impl ShortcutAction for TranscribeAction {
                             }
                         }
                         Err(err) => {
-                            debug!("Global Shortcut Transcription error: {}", err);
+                            error!("Global Shortcut Transcription error: {}", err);
                             // Save entry with empty text so user can retry
-                            if wav_saved {
-                                if let Err(save_err) =
-                                    hm.save_entry(file_name, String::new(), false, None, None)
-                                {
-                                    error!("Failed to save failed history entry: {}", save_err);
+                            let history_entry_id = if wav_saved {
+                                match hm.save_entry(file_name, String::new(), false, None, None) {
+                                    Ok(entry) => Some(entry.id),
+                                    Err(save_err) => {
+                                        error!("Failed to save failed history entry: {}", save_err);
+                                        None
+                                    }
                                 }
-                            }
+                            } else {
+                                None
+                            };
+                            let _ = ah.emit(
+                                "transcription-error",
+                                TranscriptionErrorEvent {
+                                    detail: err.to_string(),
+                                    history_entry_id,
+                                },
+                            );
                             utils::hide_recording_overlay(&ah);
                             change_tray_icon(&ah, TrayIconState::Idle);
                         }

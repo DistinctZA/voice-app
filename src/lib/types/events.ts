@@ -9,3 +9,8 @@ export interface RecordingErrorEvent {
   error_type: string;
   detail?: string;
 }
+
+export interface TranscriptionErrorEvent {
+  detail: string;
+  history_entry_id: number | null;
+}
