@@ -1,23 +1,57 @@
-name: Tag release versions
+name: Validate and tag release versions
 
 # Whenever a push to main carries a new version in package.json,
 # create the matching git tag and a GitHub Release for it.
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  validate:
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - run: bun install --frozen-lockfile
+      - name: Check release versions
+        run: bun run version:check
+      - name: Frontend regression tests
+        run: bun run test
+      - name: Lint and build frontend
+        run: |
+          bun run lint
+          bun run build
+      - name: Rust regression tests
+        working-directory: src-tauri
+        run: cargo test --lib --locked
+
   tag:
+    needs: validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Verify tracked versions match
-        run: ./scripts/check-version.sh
       - name: Tag and release new versions
         env:
           GH_TOKEN: ${{ github.token }}
