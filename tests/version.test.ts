@@ -54,7 +54,9 @@ test("bumping synchronizes all files without altering dependency versions", () =
   const originalLock = fs.readFileSync(lock, "utf8");
   const previous = checkVersions(root);
   updateVersion("9.8.7", root);
-  expect(Object.values(readVersions(root))).toEqual(Array(5).fill("9.8.7"));
+  const versions = Object.values(readVersions(root));
+  expect(versions).toHaveLength(6);
+  expect(new Set(versions)).toEqual(new Set(["9.8.7"]));
   expect(fs.readFileSync(lock, "utf8")).toBe(
     originalLock.replace(
       `name = "voiceapp"\nversion = "${previous}"`,
@@ -68,6 +70,19 @@ test("invalid versions do not change files", () => {
   const before = readVersions(root);
   expect(() => updateVersion("bad-version", root)).toThrow("semver");
   expect(readVersions(root)).toEqual(before);
+});
+
+test("detects a stale development-build version in the README", () => {
+  const root = fixture();
+  const version = checkVersions(root);
+  const readme = path.join(root, "README.md");
+  fs.writeFileSync(
+    readme,
+    fs
+      .readFileSync(readme, "utf8")
+      .replace(`VoiceApp v${version} (Dev)`, "VoiceApp v0.0.1 (Dev)"),
+  );
+  expect(() => checkVersions(root)).toThrow("README.md (dev build): 0.0.1");
 });
 
 test("reapplying the current version repairs README drift", () => {

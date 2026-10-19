@@ -10,6 +10,7 @@ const cargoVersion = /(^\[package\][\s\S]*?^version = ")([^"]+)(")/m;
 const lockVersion =
   /(^\[\[package\]\]\nname = "voiceapp"\nversion = ")([^"]+)(")/m;
 const readmeVersion = /(^\| \*\*Version\*\* \| )([^ |]+)( \|)/m;
+const readmeDevVersion = /(VoiceApp v)(\d+\.\d+\.\d+)( \(Dev\))/;
 
 function matchedVersion(contents, pattern, file) {
   const match = contents.match(pattern);
@@ -34,6 +35,11 @@ export function readVersions(root = repoRoot) {
       "Cargo.lock",
     ),
     "README.md": matchedVersion(read("README.md"), readmeVersion, "README.md"),
+    "README.md (dev build)": matchedVersion(
+      read("README.md"),
+      readmeDevVersion,
+      "README.md",
+    ),
   };
 }
 
@@ -68,6 +74,7 @@ export function updateVersion(version, root = repoRoot) {
     ["src-tauri/Cargo.toml", cargoVersion],
     ["src-tauri/Cargo.lock", lockVersion],
     ["README.md", readmeVersion],
+    ["README.md", readmeDevVersion],
   ]) {
     const filename = path.join(root, file);
     fs.writeFileSync(
@@ -93,7 +100,7 @@ if (
       throw new Error("Usage: node scripts/version.mjs <--check|version>");
     const version =
       argument === "--check" ? checkVersions() : updateVersion(argument);
-    console.log(`VoiceApp version ${version}: all five version files agree.`);
+    console.log(`VoiceApp version ${version}: all version sources agree.`);
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;
