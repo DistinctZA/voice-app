@@ -20,7 +20,7 @@ VoiceApp is built and maintained by [DistinctZA](https://github.com/DistinctZA).
 
 | | |
 |---|---|
-| **Version** | 1.4.0 |
+| **Version** | 1.4.1 |
 | **Bundle ID** | `com.distinctza.voiceapp` |
 | **Platform** | macOS (Apple Silicon) |
 | **Accent color** | `#bbff02` (lime green) |
@@ -118,7 +118,7 @@ bun install
 CMAKE_POLICY_VERSION_MINIMUM=3.5 bun run tauri dev
 ```
 
-The app appears in the menu bar as **VoiceApp v1.4.0 (Dev)**. The Vite frontend runs at `http://localhost:1420/`.
+The app appears in the menu bar as **VoiceApp v1.4.1 (Dev)**. The Vite frontend runs at `http://localhost:1420/`.
 
 ### macOS permissions (dev builds)
 
