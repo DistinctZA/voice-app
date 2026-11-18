@@ -9,7 +9,8 @@ const repoRoot = path.resolve(
 const cargoVersion = /(^\[package\][\s\S]*?^version = ")([^"]+)(")/m;
 const lockVersion =
   /(^\[\[package\]\]\nname = "voiceapp"\nversion = ")([^"]+)(")/m;
-const readmeVersion = /(^\| \*\*Version\*\* \| )([^ |]+)( \|)/m;
+const readmeVersion =
+  /(https:\/\/img\.shields\.io\/badge\/version-)(\d+\.\d+\.\d+)(-)/;
 const readmeDevVersion = /(VoiceApp v)(\d+\.\d+\.\d+)( \(Dev\))/;
 
 function matchedVersion(contents, pattern, file) {

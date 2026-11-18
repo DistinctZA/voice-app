@@ -93,7 +93,7 @@ test("reapplying the current version repairs README drift", () => {
     readme,
     fs
       .readFileSync(readme, "utf8")
-      .replace(`| **Version** | ${version} |`, "| **Version** | 0.0.1 |"),
+      .replace(`/badge/version-${version}-`, "/badge/version-0.0.1-"),
   );
   expect(() => checkVersions(root)).toThrow("README.md: 0.0.1");
   expect(updateVersion(version, root)).toBe(version);
