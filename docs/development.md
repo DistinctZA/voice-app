@@ -33,4 +33,6 @@ CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo test --locked --manifest-path src-tauri/C
 
 GitHub Actions runs the checks on pushes and pull requests. To tag a new source release, pass the new semantic version to `./scripts/bump-version.sh`, then commit and push. The workflow creates the tag once validation passes.
 
+The public source repository also serves as the Homebrew tap. After the public tag exists, update the `tag` and `revision` in `Formula/voiceapp.rb` to that tag and its public commit. The Homebrew workflow installs the formula on a fresh Mac and verifies the app signature. People who installed with Homebrew can then use `brew upgrade distinctza/voice-app/voiceapp`.
+
 When you choose to distribute a signed DMG, run `./scripts/install.sh --publish` on the configured release Mac. This builds the release artifacts, runs notarization, installs the bundle, and uploads the DMG and signed updater archive. Use `--publish-only` to resume an existing release build. [Mac releases](https://github.com/DistinctZA/voiceapp-releases)

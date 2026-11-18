@@ -15,7 +15,8 @@ Hold a shortcut, speak, and release to type your words into the app you’re usi
 </p>
 
 <p>
-  <a href="#build-from-source"><b>Build for Mac</b></a> ·
+  <a href="#install-with-homebrew"><b>Install with Homebrew</b></a> ·
+  <a href="#build-from-source">Build from source</a> ·
   <a href="#update-your-build">Update your build</a> ·
   <a href="https://voice-app.xyz/">Website</a> ·
   <a href="#features">Features</a>
@@ -26,6 +27,17 @@ Hold a shortcut, speak, and release to type your words into the app you’re usi
 </div>
 
 VoiceApp lives in the menu bar. With a local model, dictation works offline and your audio stays on your Mac. You can also choose a cloud provider and use your own API key.
+
+## Install with Homebrew
+
+On an Apple silicon Mac with [Homebrew](https://brew.sh/), add the public source repository as a tap. Homebrew installs the build tools and compiles the tagged source release on your Mac.
+
+```bash
+brew tap distinctza/voice-app https://github.com/DistinctZA/voice-app.git
+brew trust --formula distinctza/voice-app/voiceapp
+brew install distinctza/voice-app/voiceapp
+open "$(brew --prefix distinctza/voice-app/voiceapp)/libexec/VoiceApp.app"
+```
 
 ## Build from source
 
@@ -43,7 +55,15 @@ For a standalone bundle you can install yourself, run `bun run build:mac` in the
 
 ## Update your build
 
-Open Terminal in the same `voice-app` folder and run the installer again.
+**Homebrew installation.** Quit VoiceApp, run the following commands, then open the app again.
+
+```bash
+brew update
+brew upgrade distinctza/voice-app/voiceapp
+open "$(brew --prefix distinctza/voice-app/voiceapp)/libexec/VoiceApp.app"
+```
+
+**Source checkout.** Open Terminal in the same `voice-app` folder and run the installer again.
 
 ```bash
 ./scripts/install.sh

@@ -1,0 +1,29 @@
+name: Test Homebrew installation
+
+on:
+  pull_request:
+    paths: ["Formula/voiceapp.rb", ".github/workflows/homebrew.yml"]
+  push:
+    branches: [main]
+    paths: ["Formula/voiceapp.rb", ".github/workflows/homebrew.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    if: github.repository == 'DistinctZA/voice-app'
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Load the formula from this checkout
+        run: |
+          brew update
+          brew tap distinctza/voice-app "$GITHUB_WORKSPACE"
+          brew trust --formula distinctza/voice-app/voiceapp
+      - name: Build and test the app
+        run: |
+          brew install --build-from-source distinctza/voice-app/voiceapp
+          brew test distinctza/voice-app/voiceapp
