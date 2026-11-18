@@ -35,6 +35,7 @@ pub struct AudioRecorder {
     device: Option<Device>,
     cmd_tx: Option<mpsc::Sender<Cmd>>,
     worker_handle: Option<std::thread::JoinHandle<()>>,
+    stream_failed: Arc<AtomicBool>,
     vad: Option<Arc<Mutex<Box<dyn vad::VoiceActivityDetector>>>>,
     level_cb: Option<Arc<dyn Fn(Vec<f32>) + Send + Sync + 'static>>,
 }
@@ -45,6 +46,7 @@ impl AudioRecorder {
             device: None,
             cmd_tx: None,
             worker_handle: None,
+            stream_failed: Arc::new(AtomicBool::new(false)),
             vad: None,
             level_cb: None,
         })
@@ -63,10 +65,20 @@ impl AudioRecorder {
         self
     }
 
+    pub fn is_open(&self) -> bool {
+        self.worker_handle
+            .as_ref()
+            .is_some_and(|worker| !worker.is_finished())
+            && !self.stream_failed.load(Ordering::Acquire)
+    }
+
     pub fn open(&mut self, device: Option<Device>) -> Result<(), Box<dyn std::error::Error>> {
-        if self.worker_handle.is_some() {
-            return Ok(()); // already open
+        if self.is_open() {
+            return Ok(());
         }
+        self.close()?;
+        self.stream_failed.store(false, Ordering::Release);
+        let stream_failed = self.stream_failed.clone();
 
         let (sample_tx, sample_rx) = mpsc::channel::<AudioChunk>();
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>();
@@ -88,6 +100,7 @@ impl AudioRecorder {
         let worker = std::thread::spawn(move || {
             let stop_flag = Arc::new(AtomicBool::new(false));
             let stop_flag_for_stream = stop_flag.clone();
+            let callback_failed = stream_failed.clone();
             let init_result = (|| -> Result<(cpal::Stream, u32), String> {
                 let config = AudioRecorder::resolve_config(&thread_device)
                     .map_err(|e| format!("Failed to fetch preferred config: {e}"))?;
@@ -110,6 +123,7 @@ impl AudioRecorder {
                         sample_tx,
                         channels,
                         stop_flag_for_stream,
+                        callback_failed,
                     )
                     .map_err(|e| format!("Failed to build input stream: {e}"))?,
                     cpal::SampleFormat::I8 => AudioRecorder::build_stream::<i8>(
@@ -118,6 +132,7 @@ impl AudioRecorder {
                         sample_tx,
                         channels,
                         stop_flag_for_stream,
+                        callback_failed,
                     )
                     .map_err(|e| format!("Failed to build input stream: {e}"))?,
                     cpal::SampleFormat::I16 => AudioRecorder::build_stream::<i16>(
@@ -126,6 +141,7 @@ impl AudioRecorder {
                         sample_tx,
                         channels,
                         stop_flag_for_stream,
+                        callback_failed,
                     )
                     .map_err(|e| format!("Failed to build input stream: {e}"))?,
                     cpal::SampleFormat::I32 => AudioRecorder::build_stream::<i32>(
@@ -134,6 +150,7 @@ impl AudioRecorder {
                         sample_tx,
                         channels,
                         stop_flag_for_stream,
+                        callback_failed,
                     )
                     .map_err(|e| format!("Failed to build input stream: {e}"))?,
                     cpal::SampleFormat::F32 => AudioRecorder::build_stream::<f32>(
@@ -142,6 +159,7 @@ impl AudioRecorder {
                         sample_tx,
                         channels,
                         stop_flag_for_stream,
+                        callback_failed,
                     )
                     .map_err(|e| format!("Failed to build input stream: {e}"))?,
                     sample_format => {
@@ -160,7 +178,15 @@ impl AudioRecorder {
                 Ok((stream, sample_rate)) => {
                     let _ = init_tx.send(Ok(()));
                     // Keep the stream alive while we process samples.
-                    run_consumer(sample_rate, vad, sample_rx, cmd_rx, level_cb, stop_flag);
+                    run_consumer(
+                        sample_rate,
+                        vad,
+                        sample_rx,
+                        cmd_rx,
+                        level_cb,
+                        stop_flag,
+                        stream_failed,
+                    );
                     drop(stream);
                 }
                 Err(error_message) => {
@@ -200,18 +226,24 @@ impl AudioRecorder {
     }
 
     pub fn start(&self) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(tx) = &self.cmd_tx {
-            tx.send(Cmd::Start)?;
-        }
+        self.commands()?.send(Cmd::Start)?;
         Ok(())
     }
 
     pub fn stop(&self) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+        let tx = self.commands()?;
         let (resp_tx, resp_rx) = mpsc::channel();
-        if let Some(tx) = &self.cmd_tx {
-            tx.send(Cmd::Stop(resp_tx))?;
-        }
+        tx.send(Cmd::Stop(resp_tx))?;
         Ok(resp_rx.recv()?) // wait for the samples
+    }
+
+    fn commands(&self) -> std::io::Result<&mpsc::Sender<Cmd>> {
+        self.cmd_tx.as_ref().ok_or_else(|| {
+            Error::new(
+                std::io::ErrorKind::NotConnected,
+                "Microphone stream is closed",
+            )
+        })
     }
 
     pub fn close(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -231,6 +263,7 @@ impl AudioRecorder {
         sample_tx: mpsc::Sender<AudioChunk>,
         channels: usize,
         stop_flag: Arc<AtomicBool>,
+        stream_failed: Arc<AtomicBool>,
     ) -> Result<cpal::Stream, cpal::BuildStreamError>
     where
         T: Sample + SizedSample + Send + 'static,
@@ -278,7 +311,10 @@ impl AudioRecorder {
         device.build_input_stream(
             &config.clone().into(),
             stream_cb,
-            |err| log::error!("Stream error: {}", err),
+            move |err| {
+                stream_failed.store(true, Ordering::Release);
+                log::error!("Stream error: {}", err);
+            },
             None,
         )
     }
@@ -446,6 +482,7 @@ fn run_consumer(
     cmd_rx: mpsc::Receiver<Cmd>,
     level_cb: Option<Arc<dyn Fn(Vec<f32>) + Send + Sync + 'static>>,
     stop_flag: Arc<AtomicBool>,
+    stream_failed: Arc<AtomicBool>,
 ) {
     let mut frame_resampler = FrameResampler::new(
         in_sample_rate as usize,
@@ -499,14 +536,12 @@ fn run_consumer(
     }
 
     loop {
-        let chunk = match sample_rx.recv() {
-            Ok(c) => c,
-            Err(_) => break, // stream closed
-        };
-
-        let raw = match chunk {
-            AudioChunk::Samples(s) => s,
-            AudioChunk::EndOfStream => continue,
+        // A disconnected device can leave the callback (and its sender) alive
+        // without delivering more samples. Still service stop and shutdown.
+        let raw = match sample_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(AudioChunk::Samples(samples)) => samples,
+            Ok(AudioChunk::EndOfStream) | Err(mpsc::RecvTimeoutError::Timeout) => Vec::new(),
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
 
         // Apply pending commands around this chunk rather than after it.
@@ -589,8 +624,11 @@ fn run_consumer(
                                 });
                             }
                             Ok(AudioChunk::EndOfStream) => break,
-                            Err(_) => {
-                                log::warn!("Timed out waiting for EndOfStream from audio callback");
+                            Err(error) => {
+                                log::warn!(
+                                    "Microphone stopped responding while draining audio: {error}"
+                                );
+                                stream_failed.store(true, Ordering::Release);
                                 break;
                             }
                         }
@@ -612,5 +650,57 @@ fn run_consumer(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    #[test]
+    fn closed_stream_rejects_start_and_stop_without_waiting_for_a_worker() {
+        let (sent, received) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let recorder = AudioRecorder::new().unwrap();
+            sent.send((recorder.start().is_err(), recorder.stop().is_err()))
+                .unwrap();
+        });
+        assert_eq!(
+            received.recv_timeout(Duration::from_secs(2)).unwrap(),
+            (true, true)
+        );
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn stalled_microphone_can_stop_and_close_without_another_audio_callback() {
+        let (_silent_device, samples) = mpsc::channel();
+        let (commands, receiver) = mpsc::channel();
+        let (finished, done) = mpsc::channel();
+        let failed = Arc::new(AtomicBool::new(false));
+        let worker_failed = failed.clone();
+        let worker = std::thread::spawn(move || {
+            run_consumer(
+                16000,
+                None,
+                samples,
+                receiver,
+                None,
+                Arc::new(AtomicBool::new(false)),
+                worker_failed,
+            );
+            finished.send(()).unwrap();
+        });
+        commands.send(Cmd::Start).unwrap();
+        let (reply, recording) = mpsc::channel();
+        commands.send(Cmd::Stop(reply)).unwrap();
+        assert!(recording
+            .recv_timeout(Duration::from_secs(6))
+            .unwrap()
+            .is_empty());
+        assert!(failed.load(Ordering::Acquire));
+        commands.send(Cmd::Shutdown).unwrap();
+        done.recv_timeout(Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
     }
 }

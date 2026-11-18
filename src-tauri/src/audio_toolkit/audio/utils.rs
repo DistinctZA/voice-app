@@ -1,7 +1,10 @@
 use anyhow::Result;
 use hound::{WavReader, WavSpec, WavWriter};
 use log::debug;
+use std::fs::File;
+use std::io::BufWriter;
 use std::path::Path;
+use tempfile::{Builder, TempPath};
 
 /// Read a WAV file and return normalised f32 samples.
 pub fn read_wav_samples<P: AsRef<Path>>(file_path: P) -> Result<Vec<f32>> {
@@ -29,6 +32,24 @@ pub fn verify_wav_file<P: AsRef<Path>>(file_path: P, expected_samples: usize) ->
 
 /// Save audio samples as a WAV file
 pub fn save_wav_file<P: AsRef<Path>>(file_path: P, samples: &[f32]) -> Result<()> {
+    write_pcm(&mut File::create(file_path.as_ref())?, samples)?;
+    debug!("Saved WAV file: {:?}", file_path.as_ref());
+    Ok(())
+}
+
+/// Reserve a unique path before writing. The file is discarded unless History
+/// keeps it, including when dictation is cancelled during transcription.
+pub fn record_history_wav(dir: &Path, samples: &[f32]) -> Result<TempPath> {
+    let mut recording = Builder::new()
+        .prefix("voiceapp-")
+        .suffix(".wav")
+        .tempfile_in(dir)?;
+    write_pcm(recording.as_file_mut(), samples)?;
+    verify_wav_file(recording.path(), samples.len())?;
+    Ok(recording.into_temp_path())
+}
+
+fn write_pcm(file: &mut File, samples: &[f32]) -> Result<()> {
     let spec = WavSpec {
         channels: 1,
         sample_rate: 16000,
@@ -36,7 +57,7 @@ pub fn save_wav_file<P: AsRef<Path>>(file_path: P, samples: &[f32]) -> Result<()
         sample_format: hound::SampleFormat::Int,
     };
 
-    let mut writer = WavWriter::create(file_path.as_ref(), spec)?;
+    let mut writer = WavWriter::new(BufWriter::new(file), spec)?;
 
     // Convert f32 samples to i16 for WAV
     for sample in samples {
@@ -45,6 +66,23 @@ pub fn save_wav_file<P: AsRef<Path>>(file_path: P, samples: &[f32]) -> Result<()
     }
 
     writer.finalize()?;
-    debug!("Saved WAV file: {:?}", file_path.as_ref());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn consecutive_recordings_are_independent_and_abandoned_audio_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = record_history_wav(dir.path(), &[0.5]).unwrap();
+        let two = record_history_wav(dir.path(), &[-0.5]).unwrap();
+        assert_ne!(one.to_path_buf(), two.to_path_buf());
+        assert!(read_wav_samples(&one).unwrap()[0] > 0.0);
+        let abandoned = two.to_path_buf();
+        drop(two);
+        assert!(!abandoned.exists());
+        assert!(one.keep().unwrap().is_file());
+    }
 }

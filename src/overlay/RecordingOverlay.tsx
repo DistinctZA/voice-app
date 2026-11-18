@@ -99,80 +99,78 @@ const RecordingOverlay: React.FC = () => {
   const direction = getLanguageDirection(i18n.language);
 
   useEffect(() => {
-    const setupEventListeners = async () => {
-      // Listen for show-overlay event from Rust
-      const unlistenShow = await listen("show-overlay", async (event) => {
-        const overlayState = event.payload as OverlayState;
-        if (overlayState === "starting" || overlayState === "recording") {
-          // Start each recording with a flat trace — when the hotkey is
-          // pressed again quickly, leftover smoothed levels and auto-gain
-          // peak from the previous session would flash a stale waveform.
-          smoothedLevelsRef.current = Array(16).fill(0);
-          peakRef.current = 0.3;
-          setLevels(Array(16).fill(0));
+    // Listen for show-overlay event from Rust
+    const show = listen("show-overlay", async (event) => {
+      const overlayState = event.payload as OverlayState;
+      if (overlayState === "starting" || overlayState === "recording") {
+        // Start each recording with a flat trace — when the hotkey is
+        // pressed again quickly, leftover smoothed levels and auto-gain
+        // peak from the previous session would flash a stale waveform.
+        smoothedLevelsRef.current = Array(16).fill(0);
+        peakRef.current = 0.3;
+        setLevels(Array(16).fill(0));
+      }
+      // "starting" → "recording" is the same session promoting itself once
+      // the microphone is live, so the settings round trips are already
+      // done — repeating them would put IPC work right where the user
+      // starts speaking.
+      const promoting =
+        overlayState === "recording" && stateRef.current === "starting";
+      stateRef.current = overlayState;
+      setState(overlayState);
+      setIsVisible(true);
+      if (promoting) return;
+
+      // Sync language from settings each time overlay is shown
+      await syncLanguageFromSettings();
+      // Reflect cloud transcription mode with a cloud icon
+      try {
+        const result = await commands.getAppSettings();
+        setIsCloud(
+          result.status === "ok" && (result.data.stt_cloud_enabled ?? false),
+        );
+      } catch {
+        setIsCloud(false);
+      }
+    });
+
+    // Listen for hide-overlay event from Rust
+    const hide = listen("hide-overlay", () => {
+      setIsVisible(false);
+    });
+
+    // Listen for mic-level updates
+    const levels = listen<number[]>("mic-level", (event) => {
+      const newLevels = event.payload as number[];
+
+      // Auto-gain: track the recent peak (with slow decay) and normalize
+      // against it, so the trace uses the full height even for soft speech
+      // or a quiet microphone.
+      const frameMax = Math.max(...newLevels, 0);
+      peakRef.current = Math.max(frameMax, peakRef.current * 0.995, 0.3);
+      const gain = 1 / peakRef.current;
+
+      // Fast attack, slow release: jump up almost immediately when speech
+      // hits, decay smoothly when it stops.
+      const smoothed = smoothedLevelsRef.current.map((prev, i) => {
+        const target = Math.min(1, (newLevels[i] || 0) * gain);
+        return target > prev
+          ? prev * 0.25 + target * 0.75
+          : prev * 0.7 + target * 0.3;
+      });
+
+      smoothedLevelsRef.current = smoothed;
+      setLevels(smoothed);
+    });
+
+    const listeners = Promise.allSettled([show, hide, levels]);
+    return () => {
+      void listeners.then((results) => {
+        for (const result of results) {
+          if (result.status === "fulfilled") result.value();
         }
-        // "starting" → "recording" is the same session promoting itself once
-        // the microphone is live, so the settings round trips are already
-        // done — repeating them would put IPC work right where the user
-        // starts speaking.
-        const promoting =
-          overlayState === "recording" && stateRef.current === "starting";
-        stateRef.current = overlayState;
-        setState(overlayState);
-        setIsVisible(true);
-        if (promoting) return;
-
-        // Sync language from settings each time overlay is shown
-        await syncLanguageFromSettings();
-        // Reflect cloud transcription mode with a cloud icon
-        try {
-          const result = await commands.getAppSettings();
-          setIsCloud(
-            result.status === "ok" && (result.data.stt_cloud_enabled ?? false),
-          );
-        } catch {
-          setIsCloud(false);
-        }
       });
-
-      // Listen for hide-overlay event from Rust
-      const unlistenHide = await listen("hide-overlay", () => {
-        setIsVisible(false);
-      });
-
-      // Listen for mic-level updates
-      const unlistenLevel = await listen<number[]>("mic-level", (event) => {
-        const newLevels = event.payload as number[];
-
-        // Auto-gain: track the recent peak (with slow decay) and normalize
-        // against it, so the trace uses the full height even for soft speech
-        // or a quiet microphone.
-        const frameMax = Math.max(...newLevels, 0);
-        peakRef.current = Math.max(frameMax, peakRef.current * 0.995, 0.3);
-        const gain = 1 / peakRef.current;
-
-        // Fast attack, slow release: jump up almost immediately when speech
-        // hits, decay smoothly when it stops.
-        const smoothed = smoothedLevelsRef.current.map((prev, i) => {
-          const target = Math.min(1, (newLevels[i] || 0) * gain);
-          return target > prev
-            ? prev * 0.25 + target * 0.75
-            : prev * 0.7 + target * 0.3;
-        });
-
-        smoothedLevelsRef.current = smoothed;
-        setLevels(smoothed);
-      });
-
-      // Cleanup function
-      return () => {
-        unlistenShow();
-        unlistenHide();
-        unlistenLevel();
-      };
     };
-
-    setupEventListeners();
   }, []);
 
   // Redraw the voice trace whenever levels change
@@ -218,15 +216,17 @@ const RecordingOverlay: React.FC = () => {
       </div>
 
       <div className="overlay-right">
-        {state === "recording" && (
-          <div
+        {(state === "recording" || state === "transcribing") && (
+          <button
+            type="button"
+            aria-label={t("tray.cancel")}
             className="cancel-button"
             onClick={() => {
               commands.cancelOperation();
             }}
           >
             <CancelIcon />
-          </div>
+          </button>
         )}
       </div>
     </div>

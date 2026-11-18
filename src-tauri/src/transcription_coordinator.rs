@@ -2,10 +2,11 @@ use crate::actions::ACTION_MAP;
 use crate::managers::audio::AudioRecordingManager;
 use log::{debug, error, warn};
 use std::sync::mpsc::{self, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
+use tokio_util::sync::CancellationToken;
 
 // Minimum gap between accepted press events. Long enough to swallow
 // hotkey spam (which otherwise churns the start/stop pipeline and races
@@ -22,9 +23,7 @@ enum Command {
         is_pressed: bool,
         push_to_talk: bool,
     },
-    Cancel {
-        recording_was_active: bool,
-    },
+    Cancel,
     ProcessingFinished,
 }
 
@@ -40,6 +39,7 @@ enum Stage {
 /// the async transcribe-paste pipeline.
 pub struct TranscriptionCoordinator {
     tx: Sender<Command>,
+    dictation: Mutex<Option<CancellationToken>>,
 }
 
 pub fn is_transcribe_binding(id: &str) -> bool {
@@ -111,16 +111,18 @@ impl TranscriptionCoordinator {
                                 }
                             }
                         }
-                        Command::Cancel {
-                            recording_was_active,
-                        } => {
-                            // Don't reset during processing — wait for the pipeline to finish.
-                            if !matches!(stage, Stage::Processing)
-                                && (recording_was_active || matches!(stage, Stage::Recording(_)))
-                            {
+                        Command::Cancel if !matches!(stage, Stage::Idle) => {
+                            let coordinator = app.state::<TranscriptionCoordinator>();
+                            if let Some(token) = coordinator.dictation() {
+                                token.cancel();
+                            }
+                            crate::utils::discard_current_recording(&app);
+                            if matches!(stage, Stage::Recording(_)) {
+                                coordinator.end_dictation();
                                 stage = Stage::Idle;
                             }
                         }
+                        Command::Cancel => {}
                         Command::ProcessingFinished => {
                             stage = Stage::Idle;
                         }
@@ -133,7 +135,22 @@ impl TranscriptionCoordinator {
             }
         });
 
-        Self { tx }
+        Self {
+            tx,
+            dictation: Mutex::default(),
+        }
+    }
+
+    pub fn begin_dictation(&self) {
+        *self.dictation.lock().unwrap() = Some(CancellationToken::new());
+    }
+
+    pub fn dictation(&self) -> Option<CancellationToken> {
+        self.dictation.lock().unwrap().clone()
+    }
+
+    pub fn end_dictation(&self) {
+        self.dictation.lock().unwrap().take();
     }
 
     /// Send a keyboard/signal input event for a transcribe binding.
@@ -159,19 +176,19 @@ impl TranscriptionCoordinator {
         }
     }
 
-    pub fn notify_cancel(&self, recording_was_active: bool) {
-        if self
-            .tx
-            .send(Command::Cancel {
-                recording_was_active,
-            })
-            .is_err()
-        {
+    pub fn cancel(&self) {
+        // Suppress a paste already queued on the UI thread, even while the
+        // coordinator is still draining microphone input.
+        if let Some(token) = self.dictation() {
+            token.cancel();
+        }
+        if self.tx.send(Command::Cancel).is_err() {
             warn!("Transcription coordinator channel closed");
         }
     }
 
     pub fn notify_processing_finished(&self) {
+        self.end_dictation();
         if self.tx.send(Command::ProcessingFinished).is_err() {
             warn!("Transcription coordinator channel closed");
         }
@@ -201,4 +218,37 @@ fn stop(app: &AppHandle, stage: &mut Stage, binding_id: &str, hotkey_string: &st
     };
     action.stop(app, binding_id, hotkey_string);
     *stage = Stage::Processing;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::FutureExt;
+
+    #[test]
+    fn cancel_reaches_the_inflight_request_and_queued_delivery_before_cleanup() {
+        let (tx, _receiver) = mpsc::channel();
+        let coordinator = TranscriptionCoordinator {
+            tx,
+            dictation: Mutex::default(),
+        };
+        coordinator.begin_dictation();
+        let request = coordinator.dictation().unwrap();
+        let delivery = request.clone();
+        assert!(request
+            .run_until_cancelled(std::future::pending::<()>())
+            .now_or_never()
+            .is_none());
+        coordinator.cancel();
+        assert_eq!(
+            request
+                .run_until_cancelled(std::future::pending::<()>())
+                .now_or_never(),
+            Some(None)
+        );
+        coordinator.notify_processing_finished();
+        coordinator.begin_dictation();
+        assert!(delivery.is_cancelled());
+        assert!(!coordinator.dictation().unwrap().is_cancelled());
+    }
 }

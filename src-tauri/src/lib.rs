@@ -151,9 +151,7 @@ fn initialize_core_logic(app_handle: &AppHandle) {
     // on macOS before the user is ready.
 
     // Initialize the managers
-    let recording_manager = Arc::new(
-        AudioRecordingManager::new(app_handle).expect("Failed to initialize recording manager"),
-    );
+    let recording_manager = Arc::new(AudioRecordingManager::new(app_handle));
     let model_manager =
         Arc::new(ModelManager::new(app_handle).expect("Failed to initialize model manager"));
     let transcription_manager = Arc::new(

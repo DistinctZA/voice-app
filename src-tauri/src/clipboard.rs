@@ -12,75 +12,77 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 #[cfg(target_os = "linux")]
 use crate::utils::{is_kde_wayland, is_wayland};
 
-/// Pastes text using the clipboard: saves current content, writes text, sends paste keystroke, restores clipboard.
+#[cfg(target_os = "macos")]
+mod macos;
+
+/// Temporarily place the transcript on the clipboard while the target app
+/// handles its paste shortcut. Restore even if the shortcut fails.
 fn paste_via_clipboard(
     enigo: &mut Enigo,
     text: &str,
     app_handle: &AppHandle,
-    paste_method: &PasteMethod,
-    paste_delay_ms: u64,
+    settings: &crate::settings::AppSettings,
+    token: &tokio_util::sync::CancellationToken,
 ) -> Result<(), String> {
-    let clipboard = app_handle.clipboard();
-    // Ok(None-ish) vs Err matters: if the read fails (e.g. the clipboard
-    // holds an image or file, not text), restoring "" would wipe the user's
-    // clipboard — skip restoration instead.
-    let clipboard_content = clipboard.read_text().ok();
-
-    // Write text to clipboard first
-    // On Wayland, prefer wl-copy for better compatibility (especially with umlauts)
-    #[cfg(target_os = "linux")]
-    let write_result = if is_wayland() && is_wl_copy_available() {
-        info!("Using wl-copy for clipboard write on Wayland");
-        write_clipboard_via_wl_copy(text)
-    } else {
-        clipboard
-            .write_text(text)
-            .map_err(|e| format!("Failed to write to clipboard: {}", e))
+    let send_paste = || {
+        std::thread::sleep(Duration::from_millis(settings.paste_delay_ms));
+        if token.is_cancelled() {
+            return Ok(());
+        }
+        let method = &settings.paste_method;
+        #[cfg(target_os = "linux")]
+        let handled = try_send_key_combo_linux(method)?;
+        #[cfg(not(target_os = "linux"))]
+        let handled = false;
+        if !handled {
+            match method {
+                PasteMethod::CtrlV => input::send_paste_ctrl_v(enigo)?,
+                PasteMethod::CtrlShiftV => input::send_paste_ctrl_shift_v(enigo)?,
+                PasteMethod::ShiftInsert => input::send_paste_shift_insert(enigo)?,
+                _ => return Err("Invalid paste method for clipboard paste".into()),
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        Ok(())
     };
 
-    #[cfg(not(target_os = "linux"))]
-    let write_result = clipboard
-        .write_text(text)
-        .map_err(|e| format!("Failed to write to clipboard: {}", e));
-
-    write_result?;
-
-    std::thread::sleep(Duration::from_millis(paste_delay_ms));
-
-    // Send paste key combo
-    #[cfg(target_os = "linux")]
-    let key_combo_sent = try_send_key_combo_linux(paste_method)?;
-
-    #[cfg(not(target_os = "linux"))]
-    let key_combo_sent = false;
-
-    // Fall back to enigo if no native tool handled it
-    if !key_combo_sent {
-        match paste_method {
-            PasteMethod::CtrlV => input::send_paste_ctrl_v(enigo)?,
-            PasteMethod::CtrlShiftV => input::send_paste_ctrl_shift_v(enigo)?,
-            PasteMethod::ShiftInsert => input::send_paste_shift_insert(enigo)?,
-            _ => return Err("Invalid paste method for clipboard paste".into()),
-        }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app_handle;
+        return macos::with_transcript(
+            &objc2_app_kit::NSPasteboard::generalPasteboard(),
+            text,
+            settings.clipboard_handling,
+            send_paste,
+        );
     }
-
-    std::thread::sleep(std::time::Duration::from_millis(50));
-
-    // Restore original clipboard content (only when we could read it —
-    // otherwise leave the transcript rather than wiping the clipboard)
-    if let Some(original) = clipboard_content {
-        #[cfg(target_os = "linux")]
-        if is_wayland() && is_wl_copy_available() {
-            let _ = write_clipboard_via_wl_copy(&original);
+    #[cfg(not(target_os = "macos"))]
+    {
+        let clipboard = app_handle.clipboard();
+        let original = if settings.clipboard_handling == ClipboardHandling::DontModify {
+            clipboard.read_text().ok()
         } else {
-            let _ = clipboard.write_text(&original);
+            None
+        };
+        let write = |value: &str| {
+            #[cfg(target_os = "linux")]
+            if is_wayland() && is_wl_copy_available() {
+                return write_clipboard_via_wl_copy(value);
+            }
+            clipboard
+                .write_text(value.to_owned())
+                .map_err(|e| format!("Could not write clipboard: {e}"))
+        };
+        write(text)?;
+        let mut send_paste = send_paste;
+        let result = send_paste();
+        if let Some(original) = original {
+            if clipboard.read_text().ok().as_deref() == Some(text) {
+                write(&original)?;
+            }
         }
-
-        #[cfg(not(target_os = "linux"))]
-        let _ = clipboard.write_text(&original);
+        result
     }
-
-    Ok(())
 }
 
 /// Attempts to send a key combination using Linux-native tools.
@@ -593,7 +595,14 @@ fn should_send_auto_submit(auto_submit: bool, paste_method: PasteMethod) -> bool
     auto_submit && paste_method != PasteMethod::None
 }
 
-pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
+pub fn paste(
+    text: String,
+    app_handle: AppHandle,
+    token: &tokio_util::sync::CancellationToken,
+) -> Result<(), String> {
+    if token.is_cancelled() {
+        return Ok(());
+    }
     let settings = get_settings(&app_handle);
     let paste_method = settings.paste_method;
     let paste_delay_ms = settings.paste_delay_ms;
@@ -633,13 +642,7 @@ pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
             )?;
         }
         PasteMethod::CtrlV | PasteMethod::CtrlShiftV | PasteMethod::ShiftInsert => {
-            paste_via_clipboard(
-                &mut enigo,
-                &text,
-                &app_handle,
-                &paste_method,
-                paste_delay_ms,
-            )?
+            paste_via_clipboard(&mut enigo, &text, &app_handle, &settings, token)?
         }
         PasteMethod::ExternalScript => {
             let script_path = settings
@@ -653,11 +656,19 @@ pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
 
     if should_send_auto_submit(settings.auto_submit, paste_method) {
         std::thread::sleep(Duration::from_millis(50));
+        if token.is_cancelled() {
+            return Ok(());
+        }
         send_return_key(&mut enigo, settings.auto_submit_key)?;
     }
 
     // After pasting, optionally copy to clipboard based on settings
-    if settings.clipboard_handling == ClipboardHandling::CopyToClipboard {
+    if !matches!(
+        paste_method,
+        PasteMethod::CtrlV | PasteMethod::CtrlShiftV | PasteMethod::ShiftInsert
+    ) && settings.clipboard_handling == ClipboardHandling::CopyToClipboard
+        && !token.is_cancelled()
+    {
         let clipboard = app_handle.clipboard();
         clipboard
             .write_text(&text)

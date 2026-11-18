@@ -153,11 +153,6 @@ pub fn open_microphone_privacy_settings() -> Result<(), String> {
 #[tauri::command]
 #[specta::specta]
 pub fn update_microphone_mode(app: AppHandle, always_on: bool) -> Result<(), String> {
-    // Update settings
-    let mut settings = get_settings(&app);
-    settings.always_on_microphone = always_on;
-    write_settings(&app, settings);
-
     // Update the audio manager mode
     let rm = app.state::<Arc<AudioRecordingManager>>();
     let new_mode = if always_on {
@@ -167,7 +162,11 @@ pub fn update_microphone_mode(app: AppHandle, always_on: bool) -> Result<(), Str
     };
 
     rm.update_mode(new_mode)
-        .map_err(|e| format!("Failed to update microphone mode: {}", e))
+        .map_err(|e| format!("Failed to update microphone mode: {}", e))?;
+    let mut settings = get_settings(&app);
+    settings.always_on_microphone = always_on;
+    write_settings(&app, settings);
+    Ok(())
 }
 
 #[tauri::command]
@@ -207,13 +206,13 @@ pub fn set_selected_microphone(app: AppHandle, device_name: String) -> Result<()
     } else {
         Some(device_name)
     };
-    write_settings(&app, settings);
-
     // Update the audio manager to use the new device
     let rm = app.state::<Arc<AudioRecordingManager>>();
-    rm.update_selected_device()
+    rm.update_selected_device(&settings)
         .map_err(|e| format!("Failed to update selected device: {}", e))?;
-
+    let mut current = get_settings(&app);
+    current.selected_microphone = settings.selected_microphone;
+    write_settings(&app, current);
     Ok(())
 }
 

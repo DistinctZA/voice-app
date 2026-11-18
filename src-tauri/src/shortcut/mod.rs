@@ -598,17 +598,17 @@ pub fn change_start_hidden_setting(app: AppHandle, enabled: bool) -> Result<(), 
 #[tauri::command]
 #[specta::specta]
 pub fn change_autostart_setting(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let autostart_manager = app.autolaunch();
+    if enabled {
+        autostart_manager.enable()
+    } else {
+        autostart_manager.disable()
+    }
+    .map_err(|error| format!("Failed to update launch at login: {error}"))?;
+
     let mut settings = settings::get_settings(&app);
     settings.autostart_enabled = enabled;
     settings::write_settings(&app, settings);
-
-    // Apply the autostart setting immediately
-    let autostart_manager = app.autolaunch();
-    if enabled {
-        let _ = autostart_manager.enable();
-    } else {
-        let _ = autostart_manager.disable();
-    }
 
     // Notify frontend
     let _ = app.emit(

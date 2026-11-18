@@ -8,6 +8,7 @@ import type {
   AudioDevice,
   WhisperAcceleratorSetting,
   OrtAcceleratorSetting,
+  Result,
 } from "@/bindings";
 import { commands } from "@/bindings";
 
@@ -62,7 +63,9 @@ const DEFAULT_AUDIO_DEVICE: AudioDevice = {
 };
 
 const settingUpdaters: {
-  [K in keyof Settings]?: (value: Settings[K]) => Promise<unknown>;
+  [K in keyof Settings]?: (
+    value: Settings[K],
+  ) => Promise<Result<unknown, string>>;
 } = {
   always_on_microphone: (value) =>
     commands.updateMicrophoneMode(value as boolean),
@@ -144,8 +147,12 @@ const settingUpdaters: {
     commands.changeExtraRecordingBufferSetting(value as number),
 };
 
-let nextSettingUpdate = 0;
-const pendingSettingUpdates = new Map<keyof Settings, number>();
+// Apply writes to the same preference in order. A rollback must restore the
+// last value accepted by the backend, even if several optimistic writes fail.
+const pendingSettingUpdates = new Map<
+  keyof Settings,
+  { tail: Promise<void>; saved: Settings[keyof Settings] }
+>();
 
 export const useSettingsStore = create<SettingsStore>()(
   subscribeWithSelector((set, get) => ({
@@ -279,40 +286,36 @@ export const useSettingsStore = create<SettingsStore>()(
     ) => {
       const { settings, setUpdating } = get();
       const updateKey = String(key);
-      const originalValue = settings?.[key];
-      const updateId = ++nextSettingUpdate;
-      pendingSettingUpdates.set(key, updateId);
-
+      const queue = pendingSettingUpdates.get(key) ?? {
+        tail: Promise.resolve(),
+        saved: settings?.[key],
+      };
+      pendingSettingUpdates.set(key, queue);
       setUpdating(updateKey, true);
+      set((state) => ({
+        settings: state.settings ? { ...state.settings, [key]: value } : null,
+      }));
 
-      try {
-        set((state) => ({
-          settings: state.settings ? { ...state.settings, [key]: value } : null,
-        }));
-
+      const write = queue.tail.then(async () => {
         const updater = settingUpdaters[key];
         if (updater) {
           const result = await updater(value);
-          // Specta commands resolve backend failures as Result objects;
-          // they do not necessarily reject the promise.
-          if (
-            result !== null &&
-            typeof result === "object" &&
-            "status" in result &&
-            result.status === "error" &&
-            "error" in result
-          ) {
-            throw new Error(String(result.error));
-          }
+          if (result.status === "error") throw new Error(result.error);
         } else if (key !== "bindings" && key !== "selected_model") {
           console.warn(`No handler for setting: ${String(key)}`);
         }
+        queue.saved = value;
+      });
+      const tail = write.catch(() => {});
+      queue.tail = tail;
+      try {
+        await write;
       } catch (error) {
         console.error(`Failed to update setting ${String(key)}:`, error);
-        if (pendingSettingUpdates.get(key) === updateId) {
+        if (queue.tail === tail) {
           set((state) => ({
             settings: state.settings
-              ? { ...state.settings, [key]: originalValue }
+              ? { ...state.settings, [key]: queue.saved }
               : null,
           }));
           toast.error(i18n.t("errors.settingUpdateFailed"), {
@@ -320,7 +323,7 @@ export const useSettingsStore = create<SettingsStore>()(
           });
         }
       } finally {
-        if (pendingSettingUpdates.get(key) === updateId) {
+        if (queue.tail === tail) {
           pendingSettingUpdates.delete(key);
           setUpdating(updateKey, false);
         }

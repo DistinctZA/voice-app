@@ -3,7 +3,7 @@ use crate::audio_toolkit::{list_input_devices, vad::SmoothedVad, AudioRecorder, 
 use crate::helpers::clamshell;
 use crate::settings::{get_settings, AppSettings};
 use crate::utils;
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -170,7 +170,7 @@ pub struct AudioRecordingManager {
 impl AudioRecordingManager {
     /* ---------- construction ------------------------------------------------ */
 
-    pub fn new(app: &tauri::AppHandle) -> Result<Self, anyhow::Error> {
+    pub fn new(app: &tauri::AppHandle) -> Self {
         let settings = get_settings(app);
         let mode = if settings.always_on_microphone {
             MicrophoneMode::AlwaysOn
@@ -193,10 +193,14 @@ impl AudioRecordingManager {
 
         // Always-on?  Open immediately.
         if matches!(mode, MicrophoneMode::AlwaysOn) {
-            manager.start_microphone_stream()?;
+            if let Err(error) = manager.start_microphone_stream(&settings) {
+                warn!(
+                    "Microphone unavailable at launch; will retry at the next recording: {error}"
+                );
+            }
         }
 
-        Ok(manager)
+        manager
     }
 
     /* ---------- helper methods --------------------------------------------- */
@@ -206,8 +210,8 @@ impl AudioRecordingManager {
         // configured. The clamshell probe forks `ioreg`, so it only runs when
         // a clamshell microphone is actually set — otherwise the answer can't
         // change which device we pick.
-        let use_clamshell_mic = settings.clamshell_microphone.is_some()
-            && clamshell::is_clamshell().unwrap_or(false);
+        let use_clamshell_mic =
+            settings.clamshell_microphone.is_some() && clamshell::is_clamshell().unwrap_or(false);
 
         let device_name = if use_clamshell_mic {
             settings.clamshell_microphone.as_ref().unwrap()
@@ -314,9 +318,16 @@ impl AudioRecordingManager {
         Ok(())
     }
 
-    pub fn start_microphone_stream(&self) -> Result<(), anyhow::Error> {
+    fn start_microphone_stream(&self, settings: &AppSettings) -> Result<(), anyhow::Error> {
         let mut open_flag = self.is_open.lock().unwrap();
-        if *open_flag {
+        if *open_flag
+            && self
+                .recorder
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(AudioRecorder::is_open)
+        {
             debug!("Microphone stream already active");
             return Ok(());
         }
@@ -324,8 +335,8 @@ impl AudioRecordingManager {
         let start_time = Instant::now();
 
         // Get the selected device from settings, considering clamshell mode
-        let settings = get_settings(&self.app_handle);
-        let selected_device = self.get_effective_microphone_device(&settings);
+        *open_flag = false;
+        let selected_device = self.get_effective_microphone_device(settings);
 
         // Ensure VAD is loaded if it wasn't for whatever reason
         self.preload_vad()?;
@@ -385,18 +396,19 @@ impl AudioRecordingManager {
     /* ---------- mode switching --------------------------------------------- */
 
     pub fn update_mode(&self, new_mode: MicrophoneMode) -> Result<(), anyhow::Error> {
+        let state = self.state.lock().unwrap();
         let cur_mode = self.mode.lock().unwrap().clone();
 
         match (cur_mode, &new_mode) {
             (MicrophoneMode::AlwaysOn, MicrophoneMode::OnDemand) => {
-                if matches!(*self.state.lock().unwrap(), RecordingState::Idle) {
+                if matches!(*state, RecordingState::Idle) && !*self.is_recording.lock().unwrap() {
                     self.close_generation.fetch_add(1, Ordering::SeqCst);
                     self.stop_microphone_stream();
                 }
             }
             (MicrophoneMode::OnDemand, MicrophoneMode::AlwaysOn) => {
                 self.close_generation.fetch_add(1, Ordering::SeqCst);
-                self.start_microphone_stream()?;
+                self.start_microphone_stream(&get_settings(&self.app_handle))?;
             }
             _ => {}
         }
@@ -411,16 +423,10 @@ impl AudioRecordingManager {
         let mut state = self.state.lock().unwrap();
 
         if let RecordingState::Idle = *state {
-            // Ensure microphone is open in on-demand mode
-            if matches!(*self.mode.lock().unwrap(), MicrophoneMode::OnDemand) {
-                // Cancel any pending lazy close
-                self.close_generation.fetch_add(1, Ordering::SeqCst);
-                if let Err(e) = self.start_microphone_stream() {
-                    let msg = format!("{e}");
-                    error!("Failed to open microphone stream: {msg}");
-                    return Err(msg);
-                }
-            }
+            // Also retry an always-on stream lost after launch or a device change.
+            self.close_generation.fetch_add(1, Ordering::SeqCst);
+            self.start_microphone_stream(&get_settings(&self.app_handle))
+                .map_err(|error| error.to_string())?;
 
             if let Some(rec) = self.recorder.lock().unwrap().as_ref() {
                 if rec.start().is_ok() {
@@ -439,14 +445,27 @@ impl AudioRecordingManager {
         }
     }
 
-    pub fn update_selected_device(&self) -> Result<(), anyhow::Error> {
+    pub fn update_selected_device(&self, proposed: &AppSettings) -> Result<(), anyhow::Error> {
+        let state = self.state.lock().unwrap();
+        if !matches!(*state, RecordingState::Idle) || *self.is_recording.lock().unwrap() {
+            anyhow::bail!("Finish the current recording before changing microphones");
+        }
         self.invalidate_device_cache();
 
         // If currently open, restart the microphone stream to use the new device
         if *self.is_open.lock().unwrap() {
-            self.close_generation.fetch_add(1, Ordering::SeqCst);
+            // Preserve any pending idle-close timer. It holds the same state
+            // lock as this switch and still applies to the replacement stream.
             self.stop_microphone_stream();
-            self.start_microphone_stream()?;
+            if let Err(error) = self.start_microphone_stream(proposed) {
+                // Keep the previous device usable when opening the replacement fails.
+                if let Err(restore_error) =
+                    self.start_microphone_stream(&get_settings(&self.app_handle))
+                {
+                    warn!("Could not reopen the previous microphone: {restore_error}");
+                }
+                return Err(error);
+            }
         }
         Ok(())
     }

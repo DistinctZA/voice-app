@@ -123,6 +123,19 @@ describe("settings persistence failures", () => {
     expect(errorToast).not.toHaveBeenCalled();
   });
 
+  test("successive rejected writes roll back to the last saved value", async () => {
+    changePtt.mockResolvedValue({
+      status: "error",
+      error: "Microphone unavailable",
+    });
+    await Promise.all([
+      useSettingsStore.getState().updateSetting("push_to_talk", true),
+      useSettingsStore.getState().updateSetting("push_to_talk", false),
+    ]);
+    expect(useSettingsStore.getState().settings?.push_to_talk).toBe(false);
+    expect(errorToast).toHaveBeenCalledTimes(1);
+  });
+
   test("successful settings remain selected", async () => {
     await useSettingsStore.getState().updateSetting("push_to_talk", true);
     expect(useSettingsStore.getState().settings?.push_to_talk).toBe(true);

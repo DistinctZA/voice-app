@@ -218,17 +218,23 @@ impl HistoryManager {
     /// The WAV file should already have been written to the recordings directory.
     pub fn save_entry(
         &self,
-        file_name: String,
+        recording: tempfile::TempPath,
         transcription_text: String,
         post_process_requested: bool,
         post_processed_text: Option<String>,
         post_process_prompt: Option<String>,
     ) -> Result<HistoryEntry> {
+        let file_name = recording
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| anyhow!("Invalid recording file name"))?
+            .to_owned();
         let timestamp = Utc::now().timestamp();
         let title = self.format_timestamp_title(timestamp);
 
-        let conn = self.get_connection()?;
-        conn.execute(
+        let mut conn = self.get_connection()?;
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO transcription_history (
                 file_name,
                 timestamp,
@@ -252,7 +258,7 @@ impl HistoryManager {
         )?;
 
         let entry = HistoryEntry {
-            id: conn.last_insert_rowid(),
+            id: tx.last_insert_rowid(),
             file_name,
             timestamp,
             saved: false,
@@ -263,6 +269,11 @@ impl HistoryManager {
             post_process_requested,
         };
 
+        let path = recording.keep()?;
+        if let Err(error) = tx.commit() {
+            let _ = fs::remove_file(path);
+            return Err(error.into());
+        }
         debug!("Saved history entry with id {}", entry.id);
 
         self.cleanup_old_entries()?;

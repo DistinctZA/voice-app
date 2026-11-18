@@ -36,6 +36,9 @@ struct TranscriptionErrorEvent {
 struct FinishGuard(AppHandle);
 impl Drop for FinishGuard {
     fn drop(&mut self) {
+        utils::hide_recording_overlay(&self.0);
+        change_tray_icon(&self.0, TrayIconState::Idle);
+        shortcut::unregister_cancel_shortcut(&self.0);
         if let Some(c) = self.0.try_state::<TranscriptionCoordinator>() {
             c.notify_processing_finished();
         }
@@ -121,6 +124,7 @@ pub(crate) async fn process_transcription_output(
 
 impl ShortcutAction for TranscribeAction {
     fn start(&self, app: &AppHandle, binding_id: &str, _shortcut_str: &str) {
+        app.state::<TranscriptionCoordinator>().begin_dictation();
         let start_time = Instant::now();
         debug!("TranscribeAction::start called for binding: {}", binding_id);
 
@@ -167,6 +171,7 @@ impl ShortcutAction for TranscribeAction {
             // Dynamically register the cancel shortcut in a separate task to avoid deadlock
             shortcut::register_cancel_shortcut(app);
         } else {
+            app.state::<TranscriptionCoordinator>().end_dictation();
             // Starting failed (for example due to blocked microphone permissions).
             // Revert UI state so we don't stay stuck in the recording overlay.
             utils::hide_recording_overlay(app);
@@ -196,8 +201,11 @@ impl ShortcutAction for TranscribeAction {
     }
 
     fn stop(&self, app: &AppHandle, binding_id: &str, _shortcut_str: &str) {
-        // Unregister the cancel shortcut when transcription stops
-        shortcut::unregister_cancel_shortcut(app);
+        let coordinator = app.state::<TranscriptionCoordinator>();
+        let Some(token) = coordinator.dictation() else {
+            coordinator.notify_processing_finished();
+            return;
+        };
 
         let stop_time = Instant::now();
         debug!("TranscribeAction::stop called for binding: {}", binding_id);
@@ -219,150 +227,104 @@ impl ShortcutAction for TranscribeAction {
         let binding_id = binding_id.to_string(); // Clone binding_id for the async task
 
         tauri::async_runtime::spawn(async move {
-            let _guard = FinishGuard(ah.clone());
-            debug!(
-                "Starting async transcription task for binding: {}",
-                binding_id
-            );
+            // Keep the coordinator busy until the queued main-thread paste has
+            // actually run. Cancel can still win between dispatch and delivery.
+            let guard = FinishGuard(ah.clone());
+            let Some(samples) = rm.stop_recording(&binding_id) else {
+                return;
+            };
+            if samples.is_empty() || token.is_cancelled() {
+                return;
+            }
 
-            let stop_recording_time = Instant::now();
-            if let Some(samples) = rm.stop_recording(&binding_id) {
-                debug!(
-                    "Recording stopped and samples retrieved in {:?}, sample count: {}",
-                    stop_recording_time.elapsed(),
-                    samples.len()
-                );
+            let dir = hm.recordings_dir().to_owned();
+            let wav_samples = samples.clone();
+            let wav = tauri::async_runtime::spawn_blocking(move || {
+                crate::audio_toolkit::audio::record_history_wav(&dir, &wav_samples)
+            });
+            let result = if get_settings(&ah).stt_cloud_enabled {
+                token
+                    .run_until_cancelled(crate::cloud_transcription::transcribe(&ah, samples))
+                    .await
+                    .map(|result| result.map_err(anyhow::Error::msg))
+            } else {
+                // Native inference cannot be interrupted safely. Keep its model
+                // reserved until it returns, then discard a cancelled result.
+                Some(
+                    tauri::async_runtime::spawn_blocking(move || tm.transcribe(samples))
+                        .await
+                        .map_err(anyhow::Error::from)
+                        .and_then(|result| result),
+                )
+            };
+            let recording = match wav.await {
+                Ok(Ok(recording)) => Some(recording),
+                Ok(Err(error)) => {
+                    error!("Could not save recording: {error}");
+                    None
+                }
+                Err(error) => {
+                    error!("Recording writer failed: {error}");
+                    None
+                }
+            };
+            let Some(result) = result.filter(|_| !token.is_cancelled()) else {
+                return;
+            };
 
-                if samples.is_empty() {
-                    debug!("Recording produced no audio samples; skipping persistence");
-                    utils::hide_recording_overlay(&ah);
-                    change_tray_icon(&ah, TrayIconState::Idle);
-                } else {
-                    // Save WAV concurrently with transcription
-                    let sample_count = samples.len();
-                    let file_name = format!("voiceapp-{}.wav", chrono::Utc::now().timestamp());
-                    let wav_path = hm.recordings_dir().join(&file_name);
-                    let wav_path_for_verify = wav_path.clone();
-                    let samples_for_wav = samples.clone();
-                    let wav_handle = tauri::async_runtime::spawn_blocking(move || {
-                        crate::audio_toolkit::save_wav_file(&wav_path, &samples_for_wav)
-                    });
-
-                    // Transcribe concurrently with WAV save
-                    let transcription_time = Instant::now();
-                    let transcription_result = if get_settings(&ah).stt_cloud_enabled {
-                        crate::cloud_transcription::transcribe(&ah, samples)
-                            .await
-                            .map_err(|e| anyhow::anyhow!(e))
-                    } else {
-                        tm.transcribe(samples)
-                    };
-
-                    // Await WAV save and verify
-                    let wav_saved = match wav_handle.await {
-                        Ok(Ok(())) => {
-                            match crate::audio_toolkit::verify_wav_file(
-                                &wav_path_for_verify,
-                                sample_count,
-                            ) {
-                                Ok(()) => true,
-                                Err(e) => {
-                                    error!("WAV verification failed: {}", e);
-                                    false
-                                }
-                            }
-                        }
-                        Ok(Err(e)) => {
-                            error!("Failed to save WAV file: {}", e);
-                            false
-                        }
-                        Err(e) => {
-                            error!("WAV save task panicked: {}", e);
-                            false
-                        }
-                    };
-
-                    match transcription_result {
-                        Ok(transcription) => {
-                            debug!(
-                                "Transcription completed in {:?}: '{}'",
-                                transcription_time.elapsed(),
-                                transcription
-                            );
-
-                            let processed = process_transcription_output(&ah, &transcription).await;
-
-                            // Save to history if WAV was saved
-                            if wav_saved {
-                                if let Err(err) = hm.save_entry(
-                                    file_name,
-                                    transcription,
-                                    false,
-                                    processed.processed_text.clone(),
-                                    None,
-                                ) {
-                                    error!("Failed to save history entry: {}", err);
-                                }
-                            }
-
-                            if processed.final_text.is_empty() {
-                                utils::hide_recording_overlay(&ah);
-                                change_tray_icon(&ah, TrayIconState::Idle);
-                            } else {
-                                let ah_clone = ah.clone();
-                                let paste_time = Instant::now();
-                                let final_text = processed.final_text;
-                                ah.run_on_main_thread(move || {
-                                    match utils::paste(final_text, ah_clone.clone()) {
-                                        Ok(()) => debug!(
-                                            "Text pasted successfully in {:?}",
-                                            paste_time.elapsed()
-                                        ),
-                                        Err(e) => {
-                                            error!("Failed to paste transcription: {}", e);
-                                            let _ = ah_clone.emit("paste-error", ());
-                                        }
-                                    }
-                                    utils::hide_recording_overlay(&ah_clone);
-                                    change_tray_icon(&ah_clone, TrayIconState::Idle);
-                                })
-                                .unwrap_or_else(|e| {
-                                    error!("Failed to run paste on main thread: {:?}", e);
-                                    utils::hide_recording_overlay(&ah);
-                                    change_tray_icon(&ah, TrayIconState::Idle);
-                                });
-                            }
-                        }
-                        Err(err) => {
-                            error!("Global Shortcut Transcription error: {}", err);
-                            // Save entry with empty text so user can retry
-                            let history_entry_id = if wav_saved {
-                                match hm.save_entry(file_name, String::new(), false, None, None) {
-                                    Ok(entry) => Some(entry.id),
-                                    Err(save_err) => {
-                                        error!("Failed to save failed history entry: {}", save_err);
-                                        None
-                                    }
-                                }
-                            } else {
-                                None
-                            };
-                            let _ = ah.emit(
-                                "transcription-error",
-                                TranscriptionErrorEvent {
-                                    detail: err.to_string(),
-                                    history_entry_id,
-                                },
-                            );
-                            utils::hide_recording_overlay(&ah);
-                            change_tray_icon(&ah, TrayIconState::Idle);
+            match result {
+                Ok(transcript) => {
+                    let processed = process_transcription_output(&ah, &transcript).await;
+                    if token.is_cancelled() {
+                        return;
+                    }
+                    if let Some(recording) = recording {
+                        if let Err(error) = hm.save_entry(
+                            recording,
+                            transcript,
+                            false,
+                            processed.processed_text,
+                            None,
+                        ) {
+                            error!("Could not save history entry: {error}");
                         }
                     }
+                    if processed.final_text.is_empty() {
+                        return;
+                    }
+                    let app = ah.clone();
+                    if let Err(error) = ah.run_on_main_thread(move || {
+                        let _guard = guard;
+                        if !token.is_cancelled() {
+                            if let Err(error) =
+                                utils::paste(processed.final_text, app.clone(), &token)
+                            {
+                                error!("Failed to paste transcription: {error}");
+                                let _ = app.emit("paste-error", ());
+                            }
+                        }
+                    }) {
+                        error!("Failed to schedule transcription paste: {error}");
+                    }
                 }
-            } else {
-                debug!("No samples retrieved from recording stop");
-                utils::hide_recording_overlay(&ah);
-                change_tray_icon(&ah, TrayIconState::Idle);
+                Err(error) => {
+                    error!("Transcription failed: {error}");
+                    let history_entry_id = recording.and_then(|recording| {
+                        hm.save_entry(recording, String::new(), false, None, None)
+                            .map(|entry| entry.id)
+                            .map_err(|error| error!("Could not save recording for retry: {error}"))
+                            .ok()
+                    });
+                    if !token.is_cancelled() {
+                        let _ = ah.emit(
+                            "transcription-error",
+                            TranscriptionErrorEvent {
+                                detail: error.to_string(),
+                                history_entry_id,
+                            },
+                        );
+                    }
+                }
             }
         });
 
