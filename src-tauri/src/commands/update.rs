@@ -250,18 +250,18 @@ pub fn run_local_update(app: AppHandle) -> Result<(), String> {
         spawn_progress_watcher(app.clone(), progress_file.clone(), watcher_running.clone());
 
         let inner_command = format!(
-            "cd '{}' && exec /bin/bash '{}' -y --relaunch --progress-file '{}'",
-            source_path.display(),
-            install_script.display(),
-            progress_file.display(),
+            "exec /bin/bash {} -y --dev --relaunch --progress-file {}",
+            shell_escape(&install_script.to_string_lossy()),
+            shell_escape(&progress_file.to_string_lossy()),
         );
         let detached_command = format!(
-            "nohup /bin/bash -c {} </dev/null >> '{}' 2>&1 &",
+            "nohup /bin/bash -c {} </dev/null >> {} 2>&1 &",
             shell_escape(&inner_command),
-            log_file.display(),
+            shell_escape(&log_file.to_string_lossy()),
         );
 
         Command::new("/bin/bash")
+            .current_dir(&source_path)
             .args(["-c", &detached_command])
             .stdin(Stdio::null())
             .stdout(Stdio::null())

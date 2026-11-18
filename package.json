@@ -1,11 +1,12 @@
 {
   "name": "voiceapp",
   "private": true,
-  "version": "1.4.1",
+  "version": "1.4.2",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:mac": "bash scripts/build-mac.sh",
     "preview": "vite preview",
     "tauri": "tauri",
     "install:mac": "bash scripts/install.sh",

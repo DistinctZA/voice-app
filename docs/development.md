@@ -2,13 +2,22 @@
 
 The settings window and recording overlay use React and TypeScript in `src/`. The Tauri backend in `src-tauri/` handles microphone input, model loading, transcription, history, and paste. Vite serves the development frontend at `http://localhost:1420/`.
 
+## Run with live reload
+
+```bash
+bun install --frozen-lockfile
+CMAKE_POLICY_VERSION_MINIMUM=3.5 bun run tauri dev
+```
+
+For a standalone app, run `bun run build:mac`. The bundle is written to `local/release/bundle/macos/VoiceApp.app` under Cargo’s target directory, which defaults to `src-tauri/target`.
+
 ## macOS permissions
 
 macOS grants Accessibility permission to a specific executable. For a development build, use **Show app in Finder** during onboarding and add `src-tauri/target/debug/voiceapp` under **System Settings → Privacy & Security → Accessibility**. Reopen VoiceApp after granting access. Microphone permission is requested separately.
 
 ## Local installation
 
-Use `./scripts/install.sh --dev` to install a build in `/Applications` and point its in-app updater at your checkout. Run `./scripts/install.sh --check` to inspect update status. The installer also accepts `--no-pull` to use the current checkout, `--force` to rebuild, and `-y` to accept its pull prompt. Packaged Mac downloads use the [signed release feed](https://github.com/DistinctZA/voiceapp-releases/releases/latest).
+Use `./scripts/install.sh` to build locally, install in `/Applications`, and use this checkout for in-app updates. Run the same command to fetch and install new commits, or use `./scripts/install.sh --check` for a status report. The installer also accepts `--no-pull` to use the current checkout, `--force` to rebuild, and `-y` to accept its pull prompt.
 
 The macOS data directory is `~/Library/Application Support/com.distinctza.voiceapp/`. Downloaded models live in `models/`, saved audio in `recordings/`, and transcript metadata in `history.db`. Custom Whisper models can be added as `.bin` files in `models/`.
 
@@ -22,4 +31,6 @@ bun run build
 CMAKE_POLICY_VERSION_MINIMUM=3.5 cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
 ```
 
-To prepare a release, pass the new semantic version to `./scripts/bump-version.sh`. The script synchronizes the frontend, Tauri config, Rust manifest and lockfile, and README. GitHub Actions validates changes to main before tagging a new source release. The signed DMG and updater archive are distributed through the [Mac releases repository](https://github.com/DistinctZA/voiceapp-releases).
+GitHub Actions runs the checks on pushes and pull requests. To tag a new source release, pass the new semantic version to `./scripts/bump-version.sh`, then commit and push. The workflow creates the tag once validation passes.
+
+When you choose to distribute a signed DMG, run `./scripts/install.sh --publish` on the configured release Mac. This builds the release artifacts, runs notarization, installs the bundle, and uploads the DMG and signed updater archive. Use `--publish-only` to resume an existing release build. [Mac releases](https://github.com/DistinctZA/voiceapp-releases)

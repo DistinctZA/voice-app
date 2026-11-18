@@ -2,21 +2,21 @@
 # VoiceApp macOS installer — pull latest from git, build, and install to /Applications.
 #
 # Usage:
-#   ./scripts/install.sh              # check for updates, pull, build if needed, install
+#   ./scripts/install.sh              # build and install locally from this checkout
 #   ./scripts/install.sh --check      # only report update status (no build)
 #   ./scripts/install.sh --force      # rebuild and reinstall even if version/commit match
 #   ./scripts/install.sh --no-pull    # build from current local checkout (skip git pull)
 #   ./scripts/install.sh -y           # pull without confirmation prompt
 #   ./scripts/install.sh --relaunch   # reopen VoiceApp after install (used by in-app updater)
 #   ./scripts/install.sh --progress-file PATH  # write JSON progress for in-app updater UI
-#   ./scripts/install.sh --dev        # mark install as a dev install: the in-app updater
-#                                     # rebuilds from this repo instead of using the
-#                                     # customer release feed (default: customer mode)
+#   ./scripts/install.sh --dev        # keep checkout-based updates when installing a release build
+#   ./scripts/install.sh --publish    # maintainer: build, notarize, install, and publish a release
+#   ./scripts/install.sh --publish-only  # maintainer: resume an existing release build
 #
 # Update workflow (maintainers):
 #   1. Make changes and bump version:  ./scripts/bump-version.sh 1.0.2
 #   2. Commit and push to GitHub
-#   3. On each Mac:                     ./scripts/install.sh
+#   3. On the release Mac:              ./scripts/install.sh --publish
 
 set -euo pipefail
 
@@ -49,7 +49,6 @@ fi
 APP_NAME="VoiceApp"
 BUNDLE_ID="com.distinctza.voiceapp"
 INSTALL_PATH="/Applications/${APP_NAME}.app"
-BUILD_APP="${REPO_ROOT}/src-tauri/target/release/bundle/macos/${APP_NAME}.app"
 META_DIR="${HOME}/Library/Application Support/${BUNDLE_ID}"
 META_FILE="${META_DIR}/.install-meta"
 GIT_REMOTE="${VOICEAPP_GIT_REMOTE:-origin}"
@@ -62,7 +61,9 @@ AUTO_YES=false
 RELAUNCH=false
 PROGRESS_FILE=""
 DEV_INSTALL=false
+PUBLISH=false
 PUBLISH_ONLY=false
+REMOTE_BEHIND=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -94,11 +95,17 @@ while [[ $# -gt 0 ]]; do
       DEV_INSTALL=true
       shift
       ;;
+    --publish)
+      PUBLISH=true
+      FORCE=true
+      shift
+      ;;
     --publish-only)
       # Reuse the artifacts from the last build: skip pull/build and go
       # straight to notarize → install → publish. For recovering when a
       # notarization attempt hangs or the publish step failed.
       PUBLISH_ONLY=true
+      PUBLISH=true
       shift
       ;;
     -h | --help)
@@ -111,6 +118,18 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+target_dir="${CARGO_TARGET_DIR:-$REPO_ROOT/src-tauri/target}"
+if [[ "$target_dir" != /* ]]; then
+  target_dir="$REPO_ROOT/$target_dir"
+fi
+export CARGO_TARGET_DIR="$target_dir"
+if [[ "$PUBLISH" == false ]]; then
+  target_dir="$target_dir/local"
+  DEV_INSTALL=true
+fi
+BUNDLE_DIR="$target_dir/release/bundle"
+BUILD_APP="$BUNDLE_DIR/macos/${APP_NAME}.app"
 
 log() { printf '==> %s\n' "$*"; }
 warn() { printf '!! %s\n' "$*" >&2; }
@@ -144,8 +163,7 @@ progress() {
 }
 
 read_repo_version() {
-  node -p "require('${REPO_ROOT}/package.json').version" 2>/dev/null \
-    || grep -m1 '"version"' "${REPO_ROOT}/package.json" | sed -E 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
+  bun -p 'require("./package.json").version'
 }
 
 read_installed_version() {
@@ -200,11 +218,11 @@ check_git_updates() {
     local behind ahead
     behind="$(git rev-list --count HEAD.."${GIT_REMOTE}/${GIT_BRANCH}" 2>/dev/null || echo 0)"
     ahead="$(git rev-list --count "${GIT_REMOTE}/${GIT_BRANCH}"..HEAD 2>/dev/null || echo 0)"
+    REMOTE_BEHIND="$behind"
     log "Repository update available (${behind} commit(s) on remote, ${ahead} local-only)"
     git --no-pager log --oneline HEAD.."${GIT_REMOTE}/${GIT_BRANCH}" | head -5 || true
 
-    if [[ "$NO_PULL" == true ]]; then
-      warn "Skipping pull (--no-pull)"
+    if [[ "$CHECK_ONLY" == true || "$behind" == 0 ]]; then
       return 0
     fi
 
@@ -272,12 +290,7 @@ quit_running_app() {
   fi
 }
 
-build_app() {
-  cd "$REPO_ROOT"
-  progress 35 dependencies "Installing dependencies…"
-  log "Installing npm dependencies…"
-  bun install --frozen-lockfile 2>/dev/null || bun install
-
+prepare_release_signing() {
   # Signing identity, best first:
   #   1. "Developer ID Application" — Apple-trusted, required for notarization,
   #      so downloads open cleanly on every Mac (Gatekeeper).
@@ -287,7 +300,7 @@ build_app() {
   SIGNED_WITH_DEV_ID=false
   local dev_id_identity
   dev_id_identity=$(security find-identity -v -p codesigning 2>/dev/null \
-    | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')
+    | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"' || true)
   if [[ -n "$dev_id_identity" ]]; then
     export APPLE_SIGNING_IDENTITY="$dev_id_identity"
     SIGNED_WITH_DEV_ID=true
@@ -299,9 +312,6 @@ build_app() {
     warn "No signing certificate — using ad-hoc signing (permission grants will not survive updates)"
   fi
 
-  progress 45 building "Building VoiceApp (this may take several minutes)…"
-  log "Building VoiceApp (this may take several minutes)…"
-  export CMAKE_POLICY_VERSION_MINIMUM=3.5
   # Sign the auto-updater artifacts (VoiceApp.app.tar.gz.sig) so customer
   # installs can verify updates. Key generated with `tauri signer generate`.
   if [[ -f "$HOME/.tauri/voiceapp_updater.key" ]]; then
@@ -311,6 +321,19 @@ build_app() {
   else
     warn "No updater signing key at ~/.tauri/voiceapp_updater.key — updater artifacts will be unsigned"
   fi
+}
+
+build_app() {
+  cd "$REPO_ROOT"
+  local build_command=(bun run build:mac)
+  if [[ "$PUBLISH" == true ]]; then
+    progress 35 dependencies "Installing dependencies…"
+    bun install --frozen-lockfile
+    prepare_release_signing
+    export CMAKE_POLICY_VERSION_MINIMUM=3.5
+    build_command=(bun run tauri build)
+  fi
+  progress 45 building "Building VoiceApp (this may take several minutes)…"
   # CI mode makes the DMG bundler skip its Finder/AppleScript styling pass,
   # which otherwise pops a "drag to Applications" window mid-build.
   export CI=true
@@ -320,7 +343,7 @@ build_app() {
   # and surface the compiler's latest line so the bar never looks stuck.
   local build_log="${TMPDIR:-/tmp}/voiceapp-build-output.log"
   : >"$build_log"
-  bun run tauri build >"$build_log" 2>&1 &
+  "${build_command[@]}" >"$build_log" 2>&1 &
   local build_pid=$!
   local build_start elapsed pct activity
   build_start=$(date +%s)
@@ -354,10 +377,8 @@ install_app() {
   rm -rf "$INSTALL_PATH"
   ditto "$BUILD_APP" "$INSTALL_PATH"
 
-  # The .install-meta marker makes the in-app updater rebuild from this
-  # repo (slow dev lane) instead of pulling signed archives from the
-  # release feed like customers do. Only --dev installs opt in; a plain
-  # install leaves the machine on the customer update path.
+  # Source installs rebuild from this checkout. Packaged release installs
+  # use the signed update feed unless the maintainer passes --dev.
   if [[ "$DEV_INSTALL" == true ]]; then
     mkdir -p "$META_DIR"
     cat >"$META_FILE" <<EOF
@@ -412,8 +433,8 @@ NOTARY_PROFILE="voiceapp-notary"
 
 notarize_release() {
   local version="$1"
-  local dmg="${REPO_ROOT}/src-tauri/target/release/bundle/dmg/VoiceApp_${version}_aarch64.dmg"
-  local bundle_dir="${REPO_ROOT}/src-tauri/target/release/bundle/macos"
+  local dmg="$BUNDLE_DIR/dmg/VoiceApp_${version}_aarch64.dmg"
+  local bundle_dir="$BUNDLE_DIR/macos"
   local archive="${bundle_dir}/VoiceApp.app.tar.gz"
 
   if [[ "${SIGNED_WITH_DEV_ID:-false}" != true ]]; then
@@ -492,7 +513,7 @@ notarize_release() {
 publish_dmg() {
   local version="$1"
   command -v gh >/dev/null 2>&1 || return 0
-  local dmg="${REPO_ROOT}/src-tauri/target/release/bundle/dmg/VoiceApp_${version}_aarch64.dmg"
+  local dmg="$BUNDLE_DIR/dmg/VoiceApp_${version}_aarch64.dmg"
   [[ -f "$dmg" ]] || return 0
   if (cd "$REPO_ROOT" && gh release upload "v${version}" "$dmg" --clobber >/dev/null 2>&1); then
     log "Uploaded installer to GitHub release v${version}"
@@ -510,7 +531,7 @@ PUBLIC_RELEASES_REPO="DistinctZA/voiceapp-releases"
 publish_customer_release() {
   local version="$1"
   local dmg="$2"
-  local bundle_dir="${REPO_ROOT}/src-tauri/target/release/bundle/macos"
+  local bundle_dir="$BUNDLE_DIR/macos"
   local archive="${bundle_dir}/VoiceApp.app.tar.gz"
   local sig_file="${archive}.sig"
 
@@ -579,7 +600,7 @@ main() {
   # and build so its own progress bar can show the update. It is quit only
   # at the install step (see install_app), moments before the bundle swap.
 
-  if [[ "$NO_PULL" != true ]]; then
+  if [[ "$NO_PULL" != true && "$PUBLISH_ONLY" != true ]]; then
     check_git_updates
   fi
 
@@ -594,7 +615,7 @@ main() {
     installed_version="$(read_installed_version)"
     if [[ -z "$installed_version" ]]; then
       log "VoiceApp is not installed. Run without --check to install."
-    elif [[ "$installed_version" != "$repo_version" ]] || [[ "$(read_installed_commit)" != "$repo_commit" ]]; then
+    elif [[ "$REMOTE_BEHIND" != 0 || "$installed_version" != "$repo_version" || "$(read_installed_commit)" != "$repo_commit" ]]; then
       log "An update is available. Run: ./scripts/install.sh"
     else
       log "VoiceApp ${repo_version} is up to date."
@@ -604,25 +625,11 @@ main() {
 
   if [[ "$PUBLISH_ONLY" == true ]]; then
     [[ -d "$BUILD_APP" ]] || die "--publish-only: no built app at ${BUILD_APP} — run a full build first"
-    [[ -f "${REPO_ROOT}/src-tauri/target/release/bundle/dmg/VoiceApp_${repo_version}_aarch64.dmg" ]] \
+    [[ -f "$BUNDLE_DIR/dmg/VoiceApp_${repo_version}_aarch64.dmg" ]] \
       || die "--publish-only: no DMG for version ${repo_version} — run a full build first"
-    # The build exported these; re-derive them for the standalone path.
-    SIGNED_WITH_DEV_ID=false
-    security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID Application" \
-      && SIGNED_WITH_DEV_ID=true
-    if [[ -f "$HOME/.tauri/voiceapp_updater.key" ]]; then
-      TAURI_SIGNING_PRIVATE_KEY="$(cat "$HOME/.tauri/voiceapp_updater.key")"
-      TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$(cat "$HOME/.tauri/voiceapp_updater.key.password")"
-      export TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
-    fi
-    notarize_release "$repo_version"
-    install_app "$repo_version" "$repo_commit"
-    publish_dmg "$repo_version"
+    prepare_release_signing
   elif needs_build "$repo_version" "$repo_commit"; then
     build_app
-    notarize_release "$repo_version"
-    install_app "$repo_version" "$repo_commit"
-    publish_dmg "$repo_version"
   else
     log "VoiceApp ${repo_version} is already installed and matches this checkout."
     log "Use --force to rebuild anyway."
@@ -630,6 +637,14 @@ main() {
       relaunch_app
     fi
     exit 0
+  fi
+
+  if [[ "$PUBLISH" == true ]]; then
+    notarize_release "$repo_version"
+  fi
+  install_app "$repo_version" "$repo_commit"
+  if [[ "$PUBLISH" == true ]]; then
+    publish_dmg "$repo_version"
   fi
 
   echo ""
