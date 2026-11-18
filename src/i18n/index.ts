@@ -1,7 +1,8 @@
-import i18n from "i18next";
+import i18n, { type BackendModule } from "i18next";
 import { initReactI18next } from "react-i18next";
 import { locale } from "@tauri-apps/plugin-os";
 import { LANGUAGE_METADATA } from "./languages";
+import english from "./locales/en/translation.json";
 import { commands } from "@/bindings";
 import {
   getLanguageDirection,
@@ -9,23 +10,35 @@ import {
   updateDocumentLanguage,
 } from "@/lib/utils/rtl";
 
-// Auto-discover translation files using Vite's glob import
-const localeModules = import.meta.glob<{ default: Record<string, unknown> }>(
-  "./locales/*/translation.json",
-  { eager: true },
+const localeModules = import.meta.glob<Record<string, unknown>>(
+  ["./locales/*/translation.json", "!./locales/en/translation.json"],
+  { import: "default" },
 );
 
-// Build resources from discovered locale files
-const resources: Record<string, { translation: Record<string, unknown> }> = {};
-for (const [path, module] of Object.entries(localeModules)) {
-  const langCode = path.match(/\.\/locales\/(.+)\/translation\.json/)?.[1];
-  if (langCode) {
-    resources[langCode] = { translation: module.default };
-  }
-}
+// English is ready for the first render. Other languages ship with the app
+// and are loaded when i18next selects them, including regional fallbacks.
+const bundledLocales: BackendModule = {
+  type: "backend",
+  init() {},
+  read(language, _namespace, callback) {
+    const load = localeModules[`./locales/${language}/translation.json`];
+    if (!load) {
+      callback(new Error(`Unknown app language: ${language}`), false);
+      return;
+    }
+    load().then(
+      (translation) => callback(null, translation),
+      (error) => callback(error, false),
+    );
+  },
+};
 
 // Build supported languages list from discovered locales + metadata
-export const SUPPORTED_LANGUAGES = Object.keys(resources)
+const localeCodes = [
+  "en",
+  ...Object.keys(localeModules).map((path) => path.split("/")[2]),
+];
+export const SUPPORTED_LANGUAGES = localeCodes
   .map((code) => {
     const meta = LANGUAGE_METADATA[code];
     if (!meta) {
@@ -73,17 +86,21 @@ const getSupportedLanguage = (
 
 // Initialize i18n with English as default
 // Language will be synced from settings after init
-i18n.use(initReactI18next).init({
-  resources,
-  lng: "en",
-  fallbackLng: "en",
-  interpolation: {
-    escapeValue: false, // React already escapes values
-  },
-  react: {
-    useSuspense: false, // Disable suspense for SSR compatibility
-  },
-});
+i18n
+  .use(bundledLocales)
+  .use(initReactI18next)
+  .init({
+    resources: { en: { translation: english } },
+    partialBundledLanguages: true,
+    lng: "en",
+    fallbackLng: "en",
+    interpolation: {
+      escapeValue: false, // React already escapes values
+    },
+    react: {
+      useSuspense: false, // Disable suspense for SSR compatibility
+    },
+  });
 
 // Sync language from app settings
 export const syncLanguageFromSettings = async () => {
